@@ -72,10 +72,8 @@
 				this.userProfile = getCurrentUserProfile()
 			},
 			goBack() {
-				uni.navigateBack({
-					fail: () => {
-						uni.reLaunch({ url: '/pages/main/main' })
-					}
+				uni.reLaunch({
+					url: '/pages/main/main'
 				})
 			},
 			handleLogout() {
