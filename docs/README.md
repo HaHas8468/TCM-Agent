@@ -10,6 +10,8 @@
 - [design/](design/)：患者端视觉规范、医生端原型和界面说明。
 - [guides/](guides/)：后端、Agent 内核、Neo4j 图谱与参考工具说明。
 
+生产部署、证书、备份和恢复统一参见[Linux Docker Compose 全栈部署指南](guides/deployment/linux-docker-compose.md)。
+
 ## 维护约定
 
 - API 以 [API接口规范.md](api/API接口规范.md) 为唯一规范，修改后同步更新差异清单。

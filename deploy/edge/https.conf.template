@@ -1,0 +1,55 @@
+server {
+    listen 80;
+    server_name ${APP_DOMAIN};
+    client_max_body_size 128k;
+
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+        default_type "text/plain";
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl http2;
+    server_name ${APP_DOMAIN};
+    client_max_body_size 128k;
+
+    ssl_certificate /etc/letsencrypt/live/${APP_DOMAIN}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${APP_DOMAIN}/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_cache shared:TLS:10m;
+    ssl_session_timeout 10m;
+
+    location = /healthz {
+        access_log off;
+        default_type application/json;
+        return 200 '{"status":"ok","tls":"enabled"}';
+    }
+
+    location ^~ /api/ {
+        proxy_pass http://gateway:8000;
+        proxy_http_version 1.1;
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 120s;
+        proxy_set_header Host $host;
+        proxy_set_header X-Request-ID $request_id;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location ^~ /doctor/ {
+        alias /usr/share/nginx/html/doctor/;
+        try_files $uri $uri/ /doctor/index.html;
+    }
+
+    location / {
+        root /usr/share/nginx/html/patient;
+        try_files $uri $uri/ /index.html;
+    }
+}

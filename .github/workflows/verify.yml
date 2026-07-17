@@ -1,0 +1,53 @@
+name: verify
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  backend-and-compose:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Validate production compose
+        run: |
+          TCM_ENV_FILE=.env.example docker compose --env-file .env.example -f compose.yaml config --quiet
+      - name: Compile and run static backend regressions
+        working-directory: Backend/Medical_Agent
+        run: |
+          python -m pip install --upgrade pip pytest
+          python -m py_compile fastapi_app/main.py traditional_medical_agent/tcm_agent.py
+          python -m pytest Unit_Test/test_security_regressions.py Unit_Test/test_stability_regressions.py -q
+      - name: Build container images
+        run: |
+          TCM_ENV_FILE=.env.example docker compose --env-file .env.example -f compose.yaml build
+
+  frontend:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: |
+            frontend/ChineseMedicine/package-lock.json
+            frontend/DoctorBackgroundSystem/package-lock.json
+      - name: Test and build patient H5
+        working-directory: frontend/ChineseMedicine
+        run: |
+          npm ci
+          npm run test:sse
+          npm run build:h5
+      - name: Build doctor web
+        working-directory: frontend/DoctorBackgroundSystem
+        run: |
+          npm ci
+          npm run build

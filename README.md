@@ -32,44 +32,28 @@ TCM_Agent/
 
 ## 快速开始
 
-### 1. 准备依赖
+### 1. 全栈生产部署（推荐）
 
-- Python 3.10+
-- Node.js 18+
-- MySQL 与 Neo4j
-
-后端通过环境变量读取 MySQL 与模型配置；请在 `Backend/Medical_Agent/` 中创建本地 `.env`，不要提交真实账号、密码或 API Key。
-
-### 2. 启动后端
+生产环境只需要 Docker Compose、域名和有效的 DNS 解析。根目录 `.env` 是唯一生产配置来源：
 
 ```bash
-cd Backend/Medical_Agent
-python -m venv .venv
-# Linux/macOS: source .venv/bin/activate
-# Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-uvicorn fastapi_app.main:app --reload
+cp .env.example .env
+# 编辑 .env：填写 APP_DOMAIN、LETSENCRYPT_EMAIL、数据库/Neo4j/Agent/模型密钥
+./scripts/deploy.sh
 ```
 
-默认服务地址为 `http://127.0.0.1:8000`。启动前请确认 MySQL、Neo4j 连接参数以及 Agent 所需模型配置已就绪。
+部署后，患者端为 `https://<APP_DOMAIN>/`，医生端为 `https://<APP_DOMAIN>/doctor/`，API 为同域名下的 `/api/`。首次执行会经 Certbot 自动签发证书。完整前置条件、备份、恢复和回滚见[Linux 全栈部署指南](docs/guides/deployment/linux-docker-compose.md)。
 
-### 3. 启动患者端
+### 2. 本地开发
+
+后端本地开发可继续使用 `Backend/Medical_Agent/docker-compose.yml`；它只启动后端依赖与网关，不是生产部署入口。患者端和医生端分别执行：
 
 ```bash
-cd frontend/ChineseMedicine
-npm install
-npm run dev:h5
+cd frontend/ChineseMedicine && npm install && npm run dev:h5
+cd frontend/DoctorBackgroundSystem && npm install && npm run dev
 ```
 
-也可使用 `npm run dev:mp-weixin` 启动微信小程序开发模式。
-
-### 4. 启动医生端
-
-```bash
-cd frontend/DoctorBackgroundSystem
-npm install
-npm run dev
-```
+两套开发服务器均通过 `/api` 代理访问后端；如后端不在本机，可设置 `VITE_DEV_PROXY_TARGET`。小程序等非 H5 端使用 `VITE_API_BASE_URL` 配置完整后端地址。
 
 ## 文档
 

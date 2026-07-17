@@ -1,0 +1,9 @@
+[Unit]
+Description=Renew TCM-Agent Let's Encrypt certificate
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=@REPO_ROOT@
+ExecStart=@REPO_ROOT@/scripts/renew-certs.sh

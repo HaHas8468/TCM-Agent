@@ -1,7 +1,6 @@
-// 本地 Docker 部署通过 Nginx 暴露在 80 端口；生产环境通过 VITE_API_BASE_URL 覆盖。
-const CUSTOM_API_BASE_URL = 'http://127.0.0.1'
-
-export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || CUSTOM_API_BASE_URL
+// 生产环境使用同源 /api；开发服务器由 Vite proxy 转发。
+// 如需连接远程后端，在构建或启动前显式设置 VITE_API_BASE_URL。
+export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? ''
 
 function normalizeBaseUrl(value) {
   return String(value || '').trim().replace(/\/+$/, '')

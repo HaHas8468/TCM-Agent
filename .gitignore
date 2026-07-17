@@ -24,3 +24,4 @@ unpackage/
 *.zip
 *_token.txt
 *_pid.txt
+backups/

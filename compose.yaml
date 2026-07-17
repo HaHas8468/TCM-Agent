@@ -1,0 +1,189 @@
+name: tcm_agent
+
+x-logging: &default-logging
+  driver: local
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  gateway:
+    build:
+      context: ./Backend/Medical_Agent
+      dockerfile: Dockerfile
+    env_file: ${TCM_ENV_FILE:-.env}
+    depends_on:
+      redis:
+        condition: service_healthy
+      agent:
+        condition: service_healthy
+      kg:
+        condition: service_healthy
+      mysql:
+        condition: service_healthy
+    expose: ["8000"]
+    restart: unless-stopped
+    mem_limit: ${GATEWAY_MEMORY_LIMIT:-512m}
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:8000/health\")'"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks: [internal]
+    logging: *default-logging
+
+  agent:
+    build:
+      context: ./Backend/Medical_Agent
+      dockerfile: agent_service/Dockerfile
+    env_file: ${TCM_ENV_FILE:-.env}
+    depends_on:
+      redis:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      kg:
+        condition: service_healthy
+    expose: ["8001"]
+    restart: unless-stopped
+    mem_limit: ${AGENT_MEMORY_LIMIT:-1536m}
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:8001/health\")'"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks: [internal]
+    logging: *default-logging
+
+  kg:
+    build:
+      context: ./Backend/Medical_Agent
+      dockerfile: knowledge_graph_service/Dockerfile
+    env_file: ${TCM_ENV_FILE:-.env}
+    depends_on:
+      neo4j:
+        condition: service_healthy
+    expose: ["3000"]
+    restart: unless-stopped
+    mem_limit: ${KG_MEMORY_LIMIT:-512m}
+    healthcheck:
+      test: ["CMD-SHELL", "node -e 'fetch(\"http://localhost:3000/health\").then((r) => { if (!r.ok) process.exit(1) }).catch(() => process.exit(1))'"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks: [internal]
+    logging: *default-logging
+
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes: ["redis-data:/data"]
+    restart: unless-stopped
+    mem_limit: ${REDIS_MEMORY_LIMIT:-256m}
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks: [internal]
+    logging: *default-logging
+
+  mysql:
+    image: mysql:8.4
+    env_file: ${TCM_ENV_FILE:-.env}
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DB}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./Backend/Medical_Agent/scripts/init_mysql.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    restart: unless-stopped
+    mem_limit: ${MYSQL_MEMORY_LIMIT:-768m}
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -p$$MYSQL_ROOT_PASSWORD"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks: [internal]
+    logging: *default-logging
+
+  neo4j:
+    image: neo4j:5-community
+    environment:
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD}
+      NEO4J_server_memory_heap_initial__size: 512m
+      NEO4J_server_memory_heap_max__size: 768m
+      NEO4J_server_memory_pagecache_size: 512m
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes: ["neo4j-data:/data"]
+    restart: unless-stopped
+    mem_limit: ${NEO4J_MEMORY_LIMIT:-1536m}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:7474 >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks: [internal]
+    logging: *default-logging
+
+  edge:
+    build:
+      context: .
+      dockerfile: deploy/edge/Dockerfile
+      args:
+        VITE_API_BASE_URL: ""
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN:-localhost}
+      TLS_ENABLED: ${TLS_ENABLED:-0}
+      TZ: ${TZ:-Asia/Shanghai}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - certbot-conf:/etc/letsencrypt:ro
+      - certbot-www:/var/www/certbot:ro
+    depends_on:
+      gateway:
+        condition: service_healthy
+    restart: unless-stopped
+    mem_limit: ${EDGE_MEMORY_LIMIT:-256m}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- --no-check-certificate https://localhost/healthz >/dev/null || wget -qO- http://localhost/healthz >/dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks: [internal]
+    logging: *default-logging
+
+  certbot:
+    image: certbot/certbot:v2.11.0
+    profiles: ["ops"]
+    volumes:
+      - certbot-conf:/etc/letsencrypt
+      - certbot-www:/var/www/certbot
+    networks: [internal]
+
+networks:
+  internal:
+    driver: bridge
+
+volumes:
+  redis-data:
+    name: tcm_agent_redis-data
+  mysql-data:
+    name: tcm_agent_mysql-data
+  neo4j-data:
+    name: tcm_agent_neo4j-data
+  certbot-conf:
+    name: tcm_agent_certbot-conf
+  certbot-www:
+    name: tcm_agent_certbot-www
