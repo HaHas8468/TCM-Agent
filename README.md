@@ -1,0 +1,99 @@
+# TCM-Agent
+
+> 基于知识图谱与智能体的中医药两级诊疗辅助系统，连接患者端预问诊、医生端接诊工作台与中医药知识图谱。
+
+TCM-Agent 面向“线上预问诊 + 线下医生确认”的业务流程：患者可完成建档、症状采集和预约；医生可在工作台补全四诊信息、查询知识图谱并查看辅助诊疗建议。系统由患者端、医生端、业务后端和 Agent 内核组成。
+
+## 核心能力
+
+- 患者端：注册建档、智能预问诊、导诊挂号、诊疗历史和中药材科普。
+- 医生端：登录、候诊队列、接诊工作台、病历管理、知识查询与 AI 辅助。
+- 后端服务：患者、医生、预约、病历等业务 API，以及统一的 Agent 调用入口。
+- Agent 与知识图谱：症状提取、辨证辅助、方剂/药材检索、医案检索和科室推荐。
+
+## 架构
+
+```text
+患者端（Uni-app / Vue 3） ─┐
+                           ├─ 后端（FastAPI / Django） ─ MySQL
+医生端（Vue 3 / Vite）    ─┘              │
+                                          └─ Agent（LangGraph） ─ Neo4j
+```
+
+## 仓库结构
+
+```text
+TCM_Agent/
+├── Backend/Medical_Agent/              # Django、FastAPI 与 Agent 服务
+├── frontend/ChineseMedicine/           # 患者端 Uni-app（Vue 3）
+├── frontend/DoctorBackgroundSystem/    # 医生端 Vue 3 工作台
+└── docs/                               # 项目统一文档入口
+```
+
+## 快速开始
+
+### 1. 准备依赖
+
+- Python 3.10+
+- Node.js 18+
+- MySQL 与 Neo4j
+
+后端通过环境变量读取 MySQL 与模型配置；请在 `Backend/Medical_Agent/` 中创建本地 `.env`，不要提交真实账号、密码或 API Key。
+
+### 2. 启动后端
+
+```bash
+cd Backend/Medical_Agent
+python -m venv .venv
+# Linux/macOS: source .venv/bin/activate
+# Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+uvicorn fastapi_app.main:app --reload
+```
+
+默认服务地址为 `http://127.0.0.1:8000`。启动前请确认 MySQL、Neo4j 连接参数以及 Agent 所需模型配置已就绪。
+
+### 3. 启动患者端
+
+```bash
+cd frontend/ChineseMedicine
+npm install
+npm run dev:h5
+```
+
+也可使用 `npm run dev:mp-weixin` 启动微信小程序开发模式。
+
+### 4. 启动医生端
+
+```bash
+cd frontend/DoctorBackgroundSystem
+npm install
+npm run dev
+```
+
+## 文档
+
+所有项目文档统一放在 [docs/](docs/README.md)：
+
+- [完整功能需求](docs/requirements/完整功能需求说明.md)
+- [前后端 API 规范 v2.3](docs/api/API接口规范.md)
+- [系统测试用例](docs/testing/system-test-cases.md)
+- [患者端视觉规范](docs/design/patient-visual-guidelines.md)
+
+## 技术栈
+
+| 模块 | 技术 |
+| --- | --- |
+| 患者端 | Uni-app、Vue 3、Vite |
+| 医生端 | Vue 3、Vite |
+| 业务后端 | FastAPI、Django、SQLAlchemy |
+| 数据与知识图谱 | MySQL、Neo4j |
+| 智能体 | LangChain / LangGraph、LLM |
+
+## 使用边界
+
+本项目用于中医药诊疗辅助、教学与项目实践。系统输出不能替代执业医师的独立诊断、处方或紧急医疗决策；实际诊疗应由具备资质的医疗专业人员确认。
+
+## 仓库描述
+
+`基于知识图谱与智能体的中医药两级诊疗辅助系统，覆盖患者预问诊、医生接诊与中医药知识检索。`
