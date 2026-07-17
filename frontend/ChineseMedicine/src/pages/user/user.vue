@@ -2,6 +2,14 @@
 	<view class="user-page">
 		<view class="user-page__orb user-page__orb--top"></view>
 		<view class="user-page__orb user-page__orb--bottom"></view>
+		<view class="user-nav">
+			<button class="user-nav__button" aria-label="返回" @tap="goBack">
+				<image class="user-nav__icon" src="/static/design-assets/icons/lucide/arrow-left.svg" mode="aspectFit"></image>
+			</button>
+			<button class="user-nav__button user-nav__button--logout" aria-label="退出登录" @tap="handleLogout">
+				<image class="user-nav__logout-icon" src="/static/design-assets/icons/lucide/log-out.svg" mode="aspectFit"></image>
+			</button>
+		</view>
 
 		<view class="profile-hero">
 			<image class="profile-hero__background" src="/static/userBackGround.png" mode="aspectFill"></image>
@@ -17,13 +25,13 @@
 
 		<view class="content-stack">
 			<view class="menu-card">
-				<button class="menu-row" @tap="goSetting">
+				<button class="menu-row" @tap="goProfile">
 					<view class="menu-row__icon">
 						<image class="menu-row__icon-image" src="/static/design-assets/icons/lucide/user-round.svg" mode="aspectFit"></image>
 					</view>
 					<view class="menu-row__copy">
-						<text class="menu-row__title">个人设置</text>
-						<text class="menu-row__desc">查看个人信息与账户操作</text>
+						<text class="menu-row__title">个人信息</text>
+						<text class="menu-row__desc">查看和修改个人资料</text>
 					</view>
 					<text class="menu-row__arrow">›</text>
 				</button>
@@ -43,18 +51,14 @@
 			</view>
 		</view>
 
-		<common-tab-bar active-tab="user"></common-tab-bar>
 	</view>
 </template>
 
 <script>
-	import CommonTabBar from '../../components/common-tab-bar/common-tab-bar.vue'
-	import { getCurrentUserProfile } from '../../config/user-profile'
+	import { getCurrentUserProfile, resetCurrentUserProfile } from '../../config/user-profile'
+	import { clearAuth } from '../../config/http'
 
 	export default {
-		components: {
-			CommonTabBar
-		},
 		data() {
 			return {
 				userProfile: getCurrentUserProfile()
@@ -67,9 +71,31 @@
 			syncUserProfile() {
 				this.userProfile = getCurrentUserProfile()
 			},
-			goSetting() {
+			goBack() {
+				uni.navigateBack({
+					fail: () => {
+						uni.reLaunch({ url: '/pages/main/main' })
+					}
+				})
+			},
+			handleLogout() {
+				uni.showModal({
+					title: '退出账户',
+					content: '确认退出当前账户吗？',
+					cancelText: '取消',
+					confirmText: '确认',
+					confirmColor: '#84D60D',
+					success: ({ confirm }) => {
+						if (!confirm) return
+						resetCurrentUserProfile()
+						clearAuth()
+						uni.reLaunch({ url: '/pages/login/login' })
+					}
+				})
+			},
+			goProfile() {
 				uni.navigateTo({
-					url: '/pages/user/setting'
+					url: '/pages/user/profile'
 				})
 			},
 			goDiagnosisHistory() {
@@ -85,7 +111,7 @@
 	.user-page {
 		position: relative;
 		min-height: 100vh;
-		padding-bottom: calc(180rpx + env(safe-area-inset-bottom));
+		padding-bottom: calc(48rpx + env(safe-area-inset-bottom));
 		overflow: hidden;
 		background: linear-gradient(180deg, #f2f4ef 0%, #f7f5ef 100%);
 	}
@@ -106,17 +132,66 @@
 
 	.user-page__orb--bottom {
 		left: -86rpx;
-		bottom: 180rpx;
+		bottom: 48rpx;
 		width: 200rpx;
 		height: 200rpx;
 		background: rgba(47, 69, 56, 0.05);
 	}
 
+	.user-nav,
 	.profile-hero,
 	.profile-head,
 	.content-stack {
 		position: relative;
 		z-index: 1;
+	}
+
+	.user-nav {
+		position: absolute;
+		top: calc(28rpx + env(safe-area-inset-top));
+		left: 24rpx;
+		right: 24rpx;
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		z-index: 3;
+	}
+
+	.user-nav__button {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 64rpx;
+		height: 64rpx;
+		margin: 0;
+		padding: 0;
+		border: 1rpx solid rgba(47, 69, 56, 0.12);
+		border-radius: 20rpx;
+		background: rgba(255, 255, 255, 0.86);
+		box-shadow: 0 6rpx 18rpx rgba(47, 69, 56, 0.1);
+	}
+
+	.user-nav__button::after {
+		border: 0;
+	}
+
+	.user-nav__button:active {
+		transform: scale(0.96);
+	}
+
+	.user-nav__icon {
+		width: 28rpx;
+		height: 28rpx;
+	}
+
+	.user-nav__button--logout {
+		background: rgba(255, 255, 255, 0.92);
+	}
+
+	.user-nav__logout-icon {
+		width: 28rpx;
+		height: 28rpx;
+		opacity: 0.78;
 	}
 
 	.profile-hero {

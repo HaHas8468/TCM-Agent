@@ -37,13 +37,6 @@
 			}
 		},
 		{
-			"path": "pages/register/index",
-			"style": {
-				"navigationStyle": "custom",
-				"backgroundColor": "#F7F5EF"
-			}
-		},
-		{
 			"path": "pages/register/smart",
 			"style": {
 				"navigationStyle": "custom",
@@ -51,28 +44,7 @@
 			}
 		},
 		{
-			"path": "pages/register/direct",
-			"style": {
-				"navigationStyle": "custom",
-				"backgroundColor": "#F7F5EF"
-			}
-		},
-		{
-			"path": "pages/info/index",
-			"style": {
-				"navigationStyle": "custom",
-				"backgroundColor": "#F7F5EF"
-			}
-		},
-		{
 			"path": "pages/user/user",
-			"style": {
-				"navigationStyle": "custom",
-				"backgroundColor": "#F7F5EF"
-			}
-		},
-		{
-			"path": "pages/user/setting",
 			"style": {
 				"navigationStyle": "custom",
 				"backgroundColor": "#F7F5EF"

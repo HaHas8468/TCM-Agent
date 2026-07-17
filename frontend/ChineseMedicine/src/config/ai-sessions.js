@@ -16,16 +16,6 @@ function buildTimestamp(date = new Date()) {
 	return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`
 }
 
-function buildDateLabel(date = new Date()) {
-	const year = date.getFullYear()
-	const month = date.getMonth() + 1
-	const day = date.getDate()
-	const hours = padNumber(date.getHours())
-	const minutes = padNumber(date.getMinutes())
-
-	return `${year}年${month}月${day}日 ${hours}:${minutes}`
-}
-
 function parseStoredList(value) {
 	if (!value) return []
 	if (typeof value === 'string') {
@@ -113,34 +103,3 @@ export function getAiSessions() {
 		.map(normalizeSession)
 		.sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''))
 }
-
-/**
- * 根据 ID 获取单条 AI 会话记录
- * @param {string} id
- * @returns {Object|null}
- */
-export function getAiSessionById(id) {
-	if (!id) return null
-	const list = readAll()
-	const found = list.find((item) => item.id === id)
-	return found ? normalizeSession(found) : null
-}
-
-/**
- * 删除一条 AI 会话记录
- * @param {string} id
- */
-export function deleteAiSession(id) {
-	if (!id) return
-	const list = readAll().filter((item) => item.id !== id)
-	writeAll(list)
-}
-
-/**
- * 清空所有 AI 会话记录
- */
-export function clearAiSessions() {
-	writeAll([])
-}
-
-export { buildDateLabel, buildTimestamp }

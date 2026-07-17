@@ -152,22 +152,6 @@ export function mapOrderDetail(data = {}, ctx = {}) {
   }
 }
 
-// 后端最近一次诊断 -> 前端 result 结构（info/index.vue）
-export function mapLatestDiagnosis(data = {}) {
-  if (!data || !data.order_id) return null
-  return {
-    title: data.syndrome ? `辨证：${data.syndrome}` : '最近一次诊断',
-    summary: data.diagnosis_basis || '',
-    department: data.department || '待生成',
-    priority: '已同步',
-    reason: data.diagnosis_basis || '暂无诊断说明。',
-    signals: [data.syndrome, data.prescription].filter(Boolean),
-    advice: data.advice_list || [],
-    notices: ['本结果由系统同步，仅供就诊参考，不替代正式医疗诊断。'],
-    updatedAt: formatDateTime(data.sync_time) || '刚刚'
-  }
-}
-
 // 智能问诊 diagnosed -> 前端 recommendation / result 结构（smart.vue）
 export function mapDiagnosisToResult(diagnosis = {}, response = '') {
   const diag = diagnosis || {}

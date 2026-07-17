@@ -6,7 +6,6 @@ import {
   flattenDepartments,
   mapDiagnosisHistory,
   mapOrderDetail,
-  mapLatestDiagnosis,
   mapDiagnosisToResult
 } from './mappers'
 import { createSseParser } from './sse-parser'
@@ -65,24 +64,6 @@ export function updateProfile(form) {
 }
 
 // ============ 三、AI 智能问诊 ============
-
-// 3.1 Agent 非流式兼容入口（已弃用；新对话请使用 sendAgentMessageStream）
-// patient_id 由后端从 token 解析，前端无需传递
-// 后端 Agent 推理较慢，单独放宽超时到 180s（H5/App 生效；小程序平台上限仍为 60s）
-export function sendAgentMessage(payload) {
-  return request({
-    url: '/api/agent/chat',
-    method: 'POST',
-    data: {
-      session_id: payload.sessionId,
-      user_input: payload.userInput,
-      mode: payload.mode || 'normal', // normal=首问 / follow-up=追问
-      scene: payload.scene || 'guide' // guide=患者 / doctor=医生
-    },
-    loading: false,
-    timeout: 180000
-  })
-}
 
 // 3.1b Agent 正式流式入口。服务端以 SSE 返回文本片段、结构化结果和 [DONE]。
 // @returns {{ abort: Function, promise: Promise<void> }} 可取消的单次流式请求。
@@ -260,20 +241,6 @@ export function getOrderDetail(orderId) {
     method: 'GET',
     loading: true
   })
-}
-
-// ============ 十、信息中心同步 ============
-
-// 10.1 同步最近一次诊断
-export function getLatestDiagnosis() {
-  return request({
-    url: '/api/patient/latest-diagnosis',
-    method: 'GET',
-    loading: false,
-    showError: false
-  })
-    .then((data) => mapLatestDiagnosis(data))
-    .catch(() => null)
 }
 
 // 供页面直接使用的详情映射（结合列表带入的 status / department）

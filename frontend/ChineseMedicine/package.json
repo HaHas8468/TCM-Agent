@@ -7,7 +7,7 @@
     "build:h5": "uni build",
     "dev:mp-weixin": "uni -p mp-weixin",
     "build:mp-weixin": "uni build -p mp-weixin",
-    "test:sse": "node --test tests/sse-parser.test.mjs"
+		"test:sse": "node --test src/tests/sse-parser.test.mjs"
   },
   "dependencies": {
     "@dcloudio/uni-app": "3.0.0-alpha-5010220260604001",

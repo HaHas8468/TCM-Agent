@@ -5,7 +5,7 @@
 
 		<view class="register-shell">
 			<button class="back-btn" @tap="goBack">
-				<view class="back-btn__arrow"></view>
+				<image class="back-btn__icon" src="/static/design-assets/icons/lucide/arrow-left.svg" mode="aspectFit"></image>
 			</button>
 
 			<view class="copy-block">
@@ -204,19 +204,27 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		width: 76rpx;
-		height: 76rpx;
-		border-radius: 24rpx;
-		border: 2rpx solid rgba(36, 49, 44, 0.18);
-		background: rgba(255, 255, 255, 0.88);
+		width: 64rpx;
+		height: 64rpx;
+		margin: 0;
+		padding: 0;
+		border-radius: 20rpx;
+		border: 1rpx solid rgba(47, 69, 56, 0.12);
+		background: rgba(255, 255, 255, 0.86);
+		box-shadow: 0 6rpx 18rpx rgba(47, 69, 56, 0.1);
 	}
 
-	.back-btn__arrow {
-		width: 18rpx;
-		height: 18rpx;
-		border-left: 4rpx solid $cm-text-title;
-		border-bottom: 4rpx solid $cm-text-title;
-		transform: rotate(45deg);
+	.back-btn::after {
+		border: 0;
+	}
+
+	.back-btn:active {
+		transform: scale(0.96);
+	}
+
+	.back-btn__icon {
+		width: 28rpx;
+		height: 28rpx;
 	}
 
 	.copy-block__title,

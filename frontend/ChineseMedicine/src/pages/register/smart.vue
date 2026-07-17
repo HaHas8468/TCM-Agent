@@ -3,22 +3,50 @@
 		<!-- 顶栏 -->
 		<view class="chat-nav">
 			<button class="chat-nav__back" @tap="goBack">
-				<view class="chat-nav__back-arrow"></view>
+				<image class="chat-nav__action-icon" src="/static/design-assets/icons/lucide/arrow-left.svg" mode="aspectFit"></image>
 			</button>
 			<view class="chat-nav__center">
-				<view class="chat-nav__avatar">
-					<image
-						class="chat-nav__avatar-icon"
-						src="/static/design-assets/icons/lucide/messages-square.svg"
-						mode="aspectFit"
-					></image>
-				</view>
 				<view class="chat-nav__meta">
 					<text class="chat-nav__title">问方挂号助手</text>
 					<text class="chat-nav__status">{{ sending ? '正在回复…' : '在线' }}</text>
 				</view>
 			</view>
-			<view class="chat-nav__spacer"></view>
+			<view class="chat-nav__actions">
+				<button class="chat-nav__action" aria-label="历史对话" @tap="toggleSessionPanel">
+					<image class="chat-nav__action-icon" src="/static/design-assets/icons/lucide/clock-3.svg" mode="aspectFit"></image>
+				</button>
+				<button class="chat-nav__action chat-nav__action--new" aria-label="新建对话" @tap="createNewConversation">
+					<image class="chat-nav__action-icon" src="/static/design-assets/icons/lucide/plus.svg" mode="aspectFit"></image>
+				</button>
+			</view>
+		</view>
+
+		<!-- 历史记录仅在当前聊天页中展开，不跳转到其他页面 -->
+		<view v-if="showSessionPanel" class="session-overlay" @tap="closeSessionPanel">
+			<view class="session-panel" @tap.stop>
+				<view class="session-panel__head">
+					<text class="session-panel__title">历史对话</text>
+					<text class="session-panel__count">{{ aiSessions.length }} 条</text>
+				</view>
+				<scroll-view v-if="aiSessions.length" class="session-panel__list" scroll-y :show-scrollbar="false">
+					<view
+						v-for="session in aiSessions"
+						:key="session.id"
+						class="session-panel__item"
+						:class="{ 'session-panel__item--active': session.id === sessionId }"
+						@tap="loadSession(session)"
+					>
+						<text class="session-panel__summary">{{ session.summary }}</text>
+						<view class="session-panel__meta">
+							<text>{{ session.department || '智能挂号咨询' }}</text>
+							<text>{{ formatSessionTime(session.updatedAt) }}</text>
+						</view>
+					</view>
+				</scroll-view>
+				<view v-else class="session-panel__empty">
+					<text>暂时没有历史对话</text>
+				</view>
+			</view>
 		</view>
 
 		<!-- 消息区 -->
@@ -75,14 +103,38 @@
 							</view>
 							<view class="msg-assistant__body">
 								<text class="msg-assistant__name">问方助手</text>
-								<view class="msg-assistant__bubble">
+								<view v-if="item.trace && (item.trace.steps || item.trace.tools)" class="agent-trace" :class="{ 'agent-trace--thinking': item.thinking }">
+									<view class="agent-trace__header" @tap="toggleTrace(item)">
+										<view class="agent-trace__head-left">
+											<text class="agent-trace__icon">✦</text>
+											<text class="agent-trace__title" :class="{ 'agent-trace__title--thinking': item.thinking }">思考</text>
+											<view v-if="item.thinking" class="agent-trace__loading" aria-label="正在分析">
+												<view class="agent-trace__dot"></view>
+												<view class="agent-trace__dot"></view>
+												<view class="agent-trace__dot"></view>
+											</view>
+										</view>
+										<view class="agent-trace__toggle" :class="{ 'agent-trace__toggle--open': item.traceOpen }"></view>
+									</view>
+									<view v-if="item.traceOpen" class="agent-trace__body">
+										<view v-for="(step, stepIndex) in item.trace.steps || []" :key="`step-${stepIndex}`" class="agent-trace__row">
+											<text class="agent-trace__label">{{ step.title }}</text>
+											<text class="agent-trace__detail">{{ step.detail }}</text>
+										</view>
+										<view v-for="(tool, toolIndex) in item.trace.tools || []" :key="`tool-${toolIndex}`" class="agent-trace__row agent-trace__row--tool">
+											<text class="agent-trace__label">工具：{{ tool.name }}（{{ tool.status }}）</text>
+											<text class="agent-trace__detail">{{ tool.detail }}</text>
+										</view>
+									</view>
+								</view>
+								<view v-if="!item.thinking || !item.trace" class="msg-assistant__bubble">
 									<!-- 思考中 -->
 									<view v-if="item.thinking" class="typing">
 										<view class="typing__dot"></view>
 										<view class="typing__dot"></view>
 										<view class="typing__dot"></view>
 									</view>
-									<text v-else-if="!item._hideText" class="msg-assistant__text">{{ item.text }}</text>
+									<text v-else class="msg-assistant__text">{{ item.text }}</text>
 								</view>
 							</view>
 						</view>
@@ -167,8 +219,7 @@
 </template>
 
 <script>
-	import { saveLatestDiagnosisResult } from '../../config/diagnosis-result'
-	import { saveAiSession } from '../../config/ai-sessions'
+	import { getAiSessions, saveAiSession } from '../../config/ai-sessions'
 	import { sendAgentMessageStream, buildDiagnosisResult } from '../../api'
 	import { getPatientId } from '../../config/http'
 
@@ -188,6 +239,8 @@
 				streamAbort: null,
 				messages: [],
 				recommendation: null,
+				showSessionPanel: false,
+				aiSessions: [],
 				suggestionChips: [
 					'最近胃胀、食欲差，已经两周',
 					'反复咳嗽咽痛，夜间加重',
@@ -201,7 +254,7 @@
 			},
 			// 欢迎区展示时，首条问候隐藏在列表中，避免重复
 			showWelcome() {
-				return this.messages.length === 1 && this.messages[0].role === 'assistant' && !this.sending
+				return (this.messages.length === 0 || (this.messages.length === 1 && this.messages[0].role === 'assistant')) && !this.sending
 			},
 			displayMessages() {
 				if (this.showWelcome) return []
@@ -224,7 +277,62 @@
 		onHide() {
 			this.persistCurrentSession()
 		},
+		onShow() {
+			this.syncAiSessions()
+		},
 		methods: {
+			syncAiSessions() {
+				this.aiSessions = getAiSessions()
+			},
+			toggleSessionPanel() {
+				if (this.sending) {
+					uni.showToast({ title: '回复完成后再查看历史对话', icon: 'none' })
+					return
+				}
+				if (!this.showSessionPanel) {
+					this.persistCurrentSession()
+					this.syncAiSessions()
+				}
+				this.showSessionPanel = !this.showSessionPanel
+			},
+			closeSessionPanel() {
+				this.showSessionPanel = false
+			},
+			formatSessionTime(value) {
+				if (!value) return ''
+				return String(value).slice(5, 16)
+			},
+			loadSession(session) {
+				if (!session || this.sending) return
+				this.persistCurrentSession()
+				this.sessionId = session.id
+				this.messages = (session.messages || []).map((message) => ({
+					...message,
+					thinking: false,
+					trace: null,
+					traceOpen: false
+				}))
+				this.recommendation = session.diagnosis || null
+				this.draft = ''
+				this.showSessionPanel = false
+				this.scrollToBottom()
+			},
+			createNewConversation() {
+				if (this.sending) {
+					uni.showToast({ title: '回复完成后再新建对话', icon: 'none' })
+					return
+				}
+				this.persistCurrentSession()
+				this.sessionId = ''
+				this.messages = []
+				this.recommendation = null
+				this.draft = ''
+				this.showSessionPanel = false
+				this.scrollToBottom()
+			},
+			toggleTrace(message) {
+				message.traceOpen = !message.traceOpen
+			},
 			abortStream() {
 				if (this.streamAbort) {
 					try {
@@ -260,7 +368,7 @@
 				uni.navigateBack({
 					fail: () => {
 						uni.redirectTo({
-							url: '/pages/register/index'
+							url: '/pages/main/main'
 						})
 					}
 				})
@@ -330,7 +438,10 @@
 							const m = this.messages[msgIndex]
 							if (!m) return
 
-							m.thinking = false
+							// 首个 trace 事件仅表示已开始分析，仍应保持加载动画。
+							if (!(data && data.event === 'trace')) {
+								m.thinking = false
+							}
 
 							// 后端 SSE 数据可能为 {code, data:{...}} 或直接是 {status, response,...}，统一兼容
 							const inner = (data && typeof data === 'object' && data.data && typeof data.data === 'object')
@@ -339,6 +450,11 @@
 						const responseText = inner && (inner.response || inner.text)
 						const status = inner && inner.status
 						const diagnosis = inner && inner.diagnosis
+						if (inner && inner.trace) {
+							const isFirstTrace = !m.trace
+							m.trace = inner.trace
+							if (isFirstTrace) m.traceOpen = false
+						}
 
 						if (responseText) {
 							// 每个流式 payload 的 response 都是增量文本片段，依次累加展示；
@@ -347,6 +463,10 @@
 						}
 
 							if (status === 'diagnosed' && diagnosis) {
+								// 部分诊断结果只含结构化推荐字段；为该情况提供说明，避免留下空白气泡。
+								if (!m.text) {
+									m.text = '已根据您提供的现有症状生成初步挂号建议。由于信息有限，建议尽快到院面诊，由医生进一步判断。'
+								}
 								// 始终用完整累积文本 m.text 作为诊断依据，而非当次小片段 responseText
 								const result = buildDiagnosisResult(
 									diagnosis,
@@ -360,8 +480,7 @@
 										result.therapy = this.recommendation.therapy
 									}
 								}
-								this.recommendation = saveLatestDiagnosisResult(result)
-								m._hideText = true
+								this.recommendation = result
 							} else if (status === 'error') {
 								if (!m.text) {
 									m.text = responseText || '系统繁忙，请稍后重试。'
@@ -383,6 +502,8 @@
 							}
 							this.sending = false
 							this.streamAbort = null
+							this.persistCurrentSession()
+							this.syncAiSessions()
 							this.scrollToBottom()
 						},
 						onError: () => {
@@ -395,20 +516,14 @@
 							}
 							this.sending = false
 							this.streamAbort = null
+							this.persistCurrentSession()
+							this.syncAiSessions()
 							this.scrollToBottom()
 						}
 					}
 				)
 
 				this.streamAbort = stream && stream.abort ? stream.abort.bind(stream) : null
-			},
-			goDirectWithRecommendation() {
-				if (!this.recommendation) return
-				this.persistCurrentSession()
-				const department = encodeURIComponent(this.recommendation.department)
-				uni.reLaunch({
-					url: `/pages/main/main?department=${department}`
-				})
 			},
 			goHomeWithRecommendation() {
 				if (!this.recommendation) return
@@ -447,7 +562,7 @@
 						notices: ['当前结果由智能体生成，仅供就诊参考，不替代正式医疗诊断。'],
 						updatedAt: new Date().toLocaleString()
 					}
-				this.recommendation = saveLatestDiagnosisResult(result)
+				this.recommendation = result
 			}
 		}
 	}
@@ -468,7 +583,7 @@
 		display: flex;
 		align-items: center;
 		flex-shrink: 0;
-		padding: calc(12rpx + env(safe-area-inset-top)) 20rpx 16rpx;
+		padding: calc(28rpx + env(safe-area-inset-top)) 20rpx 16rpx;
 		background: rgba(247, 245, 239, 0.92);
 		border-bottom: 1rpx solid rgba(232, 236, 230, 0.9);
 		backdrop-filter: blur(16px);
@@ -479,14 +594,14 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		width: 72rpx;
-		height: 72rpx;
+		width: 64rpx;
+		height: 64rpx;
 		margin: 0;
 		padding: 0;
-		border: 0;
-		border-radius: 22rpx;
-		background: rgba(255, 255, 255, 0.9);
-		box-shadow: inset 0 0 0 2rpx rgba(36, 49, 44, 0.12);
+		border: 1rpx solid rgba(47, 69, 56, 0.12);
+		border-radius: 20rpx;
+		background: rgba(255, 255, 255, 0.86);
+		box-shadow: 0 6rpx 18rpx rgba(47, 69, 56, 0.1);
 		flex-shrink: 0;
 	}
 
@@ -494,13 +609,8 @@
 		border: 0;
 	}
 
-	.chat-nav__back-arrow {
-		width: 16rpx;
-		height: 16rpx;
-		margin-left: 6rpx;
-		border-left: 4rpx solid $cm-text-title;
-		border-bottom: 4rpx solid $cm-text-title;
-		transform: rotate(45deg);
+	.chat-nav__back:active {
+		transform: scale(0.96);
 	}
 
 	.chat-nav__center {
@@ -511,24 +621,8 @@
 		margin-left: 12rpx;
 	}
 
-	.chat-nav__avatar {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		width: 64rpx;
-		height: 64rpx;
-		border-radius: 20rpx;
-		background: rgba(132, 214, 13, 0.16);
-		flex-shrink: 0;
-	}
-
-	.chat-nav__avatar-icon {
-		width: 32rpx;
-		height: 32rpx;
-	}
-
 	.chat-nav__meta {
-		margin-left: 14rpx;
+		margin-left: 16rpx;
 		min-width: 0;
 	}
 
@@ -561,9 +655,142 @@
 		color: $cm-text-secondary;
 	}
 
-	.chat-nav__spacer {
-		width: 72rpx;
+	.chat-nav__actions {
+		display: flex;
+		align-items: center;
+		gap: 10rpx;
+		margin-left: 12rpx;
 		flex-shrink: 0;
+	}
+
+	.chat-nav__action {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 64rpx;
+		height: 64rpx;
+		margin: 0;
+		padding: 0;
+		border: 1rpx solid rgba(47, 69, 56, 0.12);
+		border-radius: 20rpx;
+		background: rgba(255, 255, 255, 0.88);
+	}
+
+	.chat-nav__action::after {
+		border: 0;
+	}
+
+	.chat-nav__action--new {
+		border-color: rgba(111, 191, 42, 0.28);
+		background: rgba(132, 214, 13, 0.14);
+	}
+
+	.chat-nav__action-icon {
+		width: 28rpx;
+		height: 28rpx;
+		opacity: 0.74;
+	}
+
+	.chat-nav__action--new .chat-nav__action-icon {
+		opacity: 1;
+	}
+
+	.chat-nav__action:active {
+		transform: scale(0.96);
+	}
+
+	/* ===== 历史会话面板 ===== */
+	.session-overlay {
+		position: fixed;
+		z-index: 20;
+		top: 0;
+		right: 0;
+		bottom: 0;
+		left: 0;
+		padding: calc(112rpx + env(safe-area-inset-top)) 24rpx 24rpx;
+		background: rgba(36, 49, 44, 0.12);
+		box-sizing: border-box;
+	}
+
+	.session-panel {
+		overflow: hidden;
+		max-height: 620rpx;
+		border: 1rpx solid rgba(47, 69, 56, 0.1);
+		border-radius: 26rpx;
+		background: #ffffff;
+		box-shadow: 0 18rpx 48rpx rgba(47, 69, 56, 0.18);
+	}
+
+	.session-panel__head {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		padding: 24rpx 26rpx 20rpx;
+		border-bottom: 1rpx solid rgba(47, 69, 56, 0.08);
+	}
+
+	.session-panel__title,
+	.session-panel__count,
+	.session-panel__summary,
+	.session-panel__meta,
+	.session-panel__empty {
+		display: block;
+	}
+
+	.session-panel__title {
+		font-size: 30rpx;
+		font-weight: 700;
+		color: $cm-text-title;
+	}
+
+	.session-panel__count {
+		padding: 5rpx 12rpx;
+		border-radius: 999rpx;
+		background: #f3f7ec;
+		font-size: 20rpx;
+		color: $cm-text-secondary;
+	}
+
+	.session-panel__list {
+		max-height: 500rpx;
+	}
+
+	.session-panel__item {
+		padding: 22rpx 26rpx;
+		border-bottom: 1rpx solid rgba(47, 69, 56, 0.07);
+	}
+
+	.session-panel__item--active {
+		background: rgba(132, 214, 13, 0.1);
+	}
+
+	.session-panel__item:active {
+		background: #f3f7ec;
+	}
+
+	.session-panel__summary {
+		overflow: hidden;
+		font-size: 26rpx;
+		font-weight: 600;
+		line-height: 1.45;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		color: $cm-text-title;
+	}
+
+	.session-panel__meta {
+		display: flex;
+		justify-content: space-between;
+		margin-top: 8rpx;
+		font-size: 21rpx;
+		color: $cm-text-secondary;
+	}
+
+	.session-panel__empty {
+		padding: 64rpx 24rpx;
+		font-size: 24rpx;
+		text-align: center;
+		color: $cm-text-secondary;
 	}
 
 	/* ===== 消息滚动区 ===== */
@@ -715,6 +942,53 @@
 		border: 1rpx solid rgba(232, 236, 230, 0.95);
 	}
 
+	.agent-trace {
+		margin: 4rpx 0 12rpx;
+		border: 1rpx solid rgba(47, 69, 56, 0.1);
+		border-radius: 18rpx;
+		background: rgba(245, 247, 244, 0.92);
+		overflow: hidden;
+	}
+
+	.agent-trace__header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		padding: 16rpx 18rpx;
+		min-height: 36rpx;
+	}
+
+	.agent-trace__head-left { display: flex; align-items: center; min-width: 0; }
+	.agent-trace__icon { margin-right: 10rpx; font-size: 24rpx; line-height: 1; color: #6f9f40; }
+	.agent-trace--thinking .agent-trace__icon { animation: tracePulse 1.4s ease-in-out infinite; }
+
+	.agent-trace__loading { display: flex; align-items: center; margin-left: 22rpx; height: 18rpx; }
+	.agent-trace__dot { width: 6rpx; height: 6rpx; margin: 0 3rpx; border-radius: 50%; background: #8eae72; animation: traceDot 1.1s ease-in-out infinite; }
+	.agent-trace__dot:nth-child(2) { animation-delay: 0.15s; }
+	.agent-trace__dot:nth-child(3) { animation-delay: 0.3s; }
+
+	@keyframes tracePulse { 0%, 100% { opacity: 0.5; transform: scale(0.92); } 50% { opacity: 1; transform: scale(1.08); } }
+	@keyframes traceDot { 0%, 60%, 100% { transform: translateY(0); opacity: 0.38; } 30% { transform: translateY(-5rpx); opacity: 1; } }
+
+	.agent-trace__title,
+	.agent-trace__label,
+	.agent-trace__detail {
+		display: block;
+	}
+
+	.agent-trace__title { font-size: 23rpx; font-weight: 600; color: #526057; }
+	.agent-trace__title--thinking { background: linear-gradient(100deg, #526057 0%, #8fb866 42%, #526057 72%); background-size: 220% 100%; background-clip: text; -webkit-background-clip: text; color: transparent; -webkit-text-fill-color: transparent; animation: traceTextShimmer 1.6s linear infinite; }
+	@keyframes traceTextShimmer { from { background-position: 100% 0; } to { background-position: -120% 0; } }
+	.agent-trace__toggle { width: 12rpx; height: 12rpx; margin-left: 28rpx; margin-right: 8rpx; border-right: 2rpx solid #7a877d; border-bottom: 2rpx solid #7a877d; transform: rotate(45deg) translateY(-3rpx); transition: transform 0.2s ease; }
+	.agent-trace__toggle--open { transform: rotate(225deg) translateY(-3rpx); }
+	.agent-trace__body { padding: 0 18rpx 16rpx; border-top: 1rpx solid rgba(47, 69, 56, 0.08); }
+	.agent-trace__row { position: relative; padding: 13rpx 0 0 18rpx; }
+	.agent-trace__row::before { content: ''; position: absolute; left: 0; top: 23rpx; width: 7rpx; height: 7rpx; border-radius: 50%; background: #8eae72; }
+	.agent-trace__row--tool { margin-top: 8rpx; padding: 12rpx 12rpx 12rpx 28rpx; border-radius: 10rpx; background: rgba(255, 255, 255, 0.72); }
+	.agent-trace__row--tool::before { left: 12rpx; top: 22rpx; background: #6f9f40; }
+	.agent-trace__label { font-size: 22rpx; font-weight: 500; color: #526057; }
+	.agent-trace__detail { margin-top: 4rpx; font-size: 21rpx; line-height: 1.5; color: #7a877d; }
+
 	.msg-assistant__text {
 		font-size: 30rpx;
 		line-height: 1.7;
@@ -858,64 +1132,6 @@
 		white-space: pre-wrap;
 		word-break: break-word;
 		color: $cm-text-body;
-	}
-
-	.direct-register-entry {
-		display: flex;
-		align-items: center;
-		margin-top: 20rpx;
-		padding: 24rpx;
-		border-radius: 24rpx;
-		background: linear-gradient(135deg, rgba(132, 214, 13, 0.12) 0%, rgba(111, 191, 42, 0.08) 100%);
-		border: 2rpx solid rgba(132, 214, 13, 0.25);
-	}
-
-	.direct-register-entry:active {
-		background: linear-gradient(135deg, rgba(132, 214, 13, 0.18) 0%, rgba(111, 191, 42, 0.14) 100%);
-	}
-
-	.direct-register-entry__icon {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		width: 72rpx;
-		height: 72rpx;
-		border-radius: 20rpx;
-		background: rgba(132, 214, 13, 0.18);
-		flex-shrink: 0;
-	}
-
-	.direct-register-entry__icon-img {
-		width: 36rpx;
-		height: 36rpx;
-	}
-
-	.direct-register-entry__content {
-		flex: 1;
-		margin-left: 18rpx;
-	}
-
-	.direct-register-entry__label {
-		display: block;
-		font-size: 24rpx;
-		color: $cm-text-secondary;
-	}
-
-	.direct-register-entry__department {
-		display: block;
-		margin-top: 6rpx;
-		font-size: 32rpx;
-		font-weight: 700;
-		color: $cm-color-brand-deep;
-	}
-
-	.direct-register-entry__arrow {
-		width: 16rpx;
-		height: 16rpx;
-		border-right: 4rpx solid $cm-color-brand-deep;
-		border-bottom: 4rpx solid $cm-color-brand-deep;
-		transform: rotate(-45deg);
-		flex-shrink: 0;
 	}
 
 	/* ===== 推荐科室快捷入口 ===== */

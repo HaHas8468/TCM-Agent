@@ -1,6 +1,6 @@
 // 后端服务地址（患者端）
 // 如需切换环境，直接修改此处即可。
-export const BASE_URL = 'http://111.119.237.88:16009'
+export const BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1'
 
 // 默认请求超时（毫秒）。后端 Agent 推理可能较慢，统一放宽到 120s。
 // 注意：微信小程序平台自身上限为 60000ms，超出部分会被平台强制截断。

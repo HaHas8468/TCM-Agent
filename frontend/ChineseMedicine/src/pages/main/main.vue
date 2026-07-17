@@ -9,8 +9,8 @@
 					<image class="hero-card__date-icon" src="/static/design-assets/icons/lucide/calendar-days.svg" mode="aspectFit"></image>
 					<text class="hero-card__date-text">{{ dateLabel }}</text>
 				</view>
-				<view class="hero-card__notice" @tap="handleLogout">
-					<image class="hero-card__notice-icon" src="/static/design-assets/icons/lucide/log-out.svg" mode="aspectFit"></image>
+				<view class="hero-card__profile-button" aria-label="个人中心" @tap="goUser">
+					<image class="hero-card__profile-image" :src="userProfile.avatar" mode="aspectFill"></image>
 				</view>
 			</view>
 
@@ -114,14 +114,11 @@
 			</view>
 		</view>
 
-		<common-tab-bar active-tab="home"></common-tab-bar>
 	</view>
 </template>
 
 <script>
-	import CommonTabBar from '../../components/common-tab-bar/common-tab-bar.vue'
-	import { getCurrentUserProfile, resetCurrentUserProfile } from '../../config/user-profile'
-	import { clearAuth } from '../../config/http'
+	import { getCurrentUserProfile } from '../../config/user-profile'
 	import { getDepartments, getDoctorSlots, createOrder, DEPARTMENT_OPTIONS } from '../../api'
 
 
@@ -133,9 +130,6 @@
 	}
 
 	export default {
-		components: {
-			CommonTabBar
-		},
 		data() {
 			const todayDate = formatDate(new Date())
 			return {
@@ -220,21 +214,9 @@
 
 				this.dateLabel = `${year}年${month}月${day}日，${weekLabel}`
 			},
-			handleLogout() {
-				uni.showModal({
-					title: '退出账户',
-					content: '确认退出当前账户吗？',
-					confirmColor: '#84D60D',
-					success: ({ confirm }) => {
-						if (!confirm) {
-							return
-						}
-						resetCurrentUserProfile()
-						clearAuth()
-						uni.reLaunch({
-							url: '/pages/login/login'
-						})
-					}
+			goUser() {
+				uni.navigateTo({
+					url: '/pages/user/user'
 				})
 			},
 		goSmartRegister() {
@@ -370,7 +352,7 @@
 	.main-page {
 		position: relative;
 		min-height: 100vh;
-		padding: calc(20rpx + env(safe-area-inset-top)) 26rpx calc(180rpx + env(safe-area-inset-bottom));
+		padding: calc(20rpx + env(safe-area-inset-top)) 26rpx calc(48rpx + env(safe-area-inset-bottom));
 		overflow: hidden;
 		background: linear-gradient(180deg, #f2f4ef 0%, #f7f5ef 100%);
 	}
@@ -391,7 +373,7 @@
 
 	.main-page__orb--bottom {
 		left: -86rpx;
-		bottom: 180rpx;
+		bottom: 48rpx;
 		width: 200rpx;
 		height: 200rpx;
 		background: rgba(47, 69, 56, 0.06);
@@ -407,7 +389,7 @@
 
 	.hero-card {
 		margin: calc(-20rpx - env(safe-area-inset-top)) -26rpx 0;
-		padding: calc(42rpx + env(safe-area-inset-top)) 26rpx 24rpx;
+		padding: calc(28rpx + env(safe-area-inset-top)) 26rpx 24rpx;
 		overflow: hidden;
 		border-radius: 0 0 56rpx 56rpx;
 		background: linear-gradient(145deg, #ffffff 0%, #f7faef 58%, #edf6e4 100%);
@@ -452,41 +434,31 @@
 		color: $cm-text-secondary;
 	}
 
-	.hero-card__notice {
+	.hero-card__profile-button {
 		display: flex;
 		flex-shrink: 0;
 		align-items: center;
 		justify-content: center;
-		width: 76rpx;
-		height: 76rpx;
-		padding: 0;
+		width: 64rpx;
+		height: 64rpx;
+		padding: 4rpx;
 		border: 2rpx solid rgba(47, 69, 56, 0.12);
-		border-radius: 28rpx;
+		border-radius: 20rpx;
 		background: rgba(255, 255, 255, 0.72);
 		box-sizing: border-box;
+		overflow: hidden;
 	}
 
-	.hero-card__notice-icon {
+	.hero-card__profile-image {
 		display: block;
-		width: 36rpx;
-		height: 36rpx;
-		opacity: 1;
-	}
-
-	.hero-card__notice-dot {
-		position: absolute;
-		top: 14rpx;
-		right: 16rpx;
-		width: 16rpx;
-		height: 16rpx;
-		border-radius: 50%;
-		background: #e86c76;
-		box-shadow: 0 0 0 3rpx rgba(247, 250, 243, 0.96);
+		width: 100%;
+		height: 100%;
+		border-radius: 16rpx;
 	}
 
 	.hero-card__main {
 		align-items: center;
-		margin-top: 42rpx;
+		margin-top: 32rpx;
 	}
 
 	.hero-card__avatar {
@@ -532,14 +504,15 @@
 	}
 
 	.hero-card__bottom-space {
-		height: 74rpx;
-		margin-top: 24rpx;
+		height: 50rpx;
+		margin-top: 16rpx;
 	}
 
 	.content-stack {
 		position: relative;
 		z-index: 1;
-		width: 100%;
+		width: calc(100% + 20rpx);
+		margin-left: -10rpx;
 		margin-top: 24rpx;
 		box-sizing: border-box;
 	}
@@ -603,7 +576,7 @@
 	.smart-card {
 		position: relative;
 		width: 100%;
-		min-height: 280rpx;
+		min-height: 340rpx;
 		margin-top: 24rpx;
 		padding: 24rpx;
 		border-radius: 28rpx;

@@ -69,7 +69,6 @@
 
 				<button class="primary-btn" :disabled="loading" @tap="handleLogin">
 					<text class="primary-btn__text">{{ loading ? '登录中...' : '登 录' }}</text>
-					<text class="primary-btn__arrow">→</text>
 				</button>
 
 				<view class="meta-row">
@@ -464,15 +463,10 @@
 		box-shadow: 0 10px 22px rgba(132, 214, 13, 0.22);
 	}
 
-	.primary-btn__text,
-	.primary-btn__arrow {
+	.primary-btn__text {
 		color: #ffffff;
 		font-size: 30rpx;
 		font-weight: 700;
-	}
-
-	.primary-btn__arrow {
-		margin-left: 16rpx;
 	}
 
 	.meta-row {
