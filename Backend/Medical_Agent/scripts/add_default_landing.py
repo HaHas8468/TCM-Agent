@@ -1,6 +1,7 @@
 import pymysql
+import os
 
-conn = pymysql.connect(host='localhost', user='root', password='TANXIAOYU', db='traditional_medical', port=3306)
+conn = pymysql.connect(host=os.environ['MYSQL_HOST'], user=os.environ['MYSQL_USER'], password=os.environ['MYSQL_PASSWORD'], db=os.environ['MYSQL_DB'], port=int(os.getenv('MYSQL_PORT', '3306')))
 cursor = conn.cursor()
 
 try:

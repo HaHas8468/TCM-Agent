@@ -1,9 +1,8 @@
 import os
 import re
 import json
-import traceback
+import logging
 import time
-import threading
 from typing import List, Dict, Optional, Any, TypedDict, Annotated, Literal
 from operator import add
 from dotenv import load_dotenv
@@ -12,8 +11,8 @@ from langchain_community.chat_models import ChatTongyi
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
 from langgraph.graph import StateGraph, END
-from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.messages import HumanMessage, AIMessage, BaseMessage
+import redis
 from kg_service import (
     query_kg_for_symptoms, custom_query_kg, _extract_query_target,
     search_medical_cases, search_medical_cases_by_clinical_options, get_medical_case_detail,
@@ -22,6 +21,7 @@ from kg_service import (
 )
 
 load_dotenv()
+logger = logging.getLogger(__name__)
 
 
 SYMPTOM_NORMALIZATION_PROMPT = """你是一位专业的中医师助理，擅长从用户输入中准确提取症状、舌象和脉象信息。
@@ -112,6 +112,61 @@ class DiagnosisResult(BaseModel):
     department: str = Field(description="推荐科室")
     allergy_warnings: Optional[List[str]] = Field(description="过敏药材警告")
     kg_warning: Optional[str] = Field(description="知识图谱安全提示")
+
+
+class RedisSessionStore:
+    """带 TTL 的会话状态。仅存储结构化状态，避免 LangGraph 内存检查点无限增长。"""
+
+    def __init__(self, ttl_seconds: int = 3600):
+        self.ttl_seconds = ttl_seconds
+        self._client = None
+
+    @property
+    def client(self):
+        if self._client is None:
+            redis_url = os.getenv("REDIS_URL")
+            if not redis_url:
+                raise RuntimeError("REDIS_URL 未配置")
+            self._client = redis.Redis.from_url(redis_url, decode_responses=True, socket_connect_timeout=2)
+        return self._client
+
+    @staticmethod
+    def _encode(value):
+        if isinstance(value, BaseMessage):
+            return {"__kind__": "message", "type": value.type, "content": value.content}
+        if isinstance(value, SymptomsInfo):
+            return {"__kind__": "symptoms", "data": value.model_dump()}
+        if isinstance(value, DiagnosisResult):
+            return {"__kind__": "diagnosis", "data": value.model_dump()}
+        if isinstance(value, BaseModel):
+            return value.model_dump(mode="json")
+        if isinstance(value, dict):
+            return {str(k): RedisSessionStore._encode(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [RedisSessionStore._encode(item) for item in value]
+        return value
+
+    @staticmethod
+    def _decode(value):
+        if isinstance(value, list):
+            return [RedisSessionStore._decode(item) for item in value]
+        if not isinstance(value, dict):
+            return value
+        kind = value.get("__kind__")
+        if kind == "message":
+            return HumanMessage(content=value.get("content", "")) if value.get("type") == "human" else AIMessage(content=value.get("content", ""))
+        if kind == "symptoms":
+            return SymptomsInfo(**value["data"])
+        if kind == "diagnosis":
+            return DiagnosisResult(**value["data"])
+        return {key: RedisSessionStore._decode(item) for key, item in value.items()}
+
+    def get(self, session_id: str, default=None):
+        raw = self.client.get(f"agent:session:{session_id}")
+        return self._decode(json.loads(raw)) if raw else default
+
+    def __setitem__(self, session_id: str, value: dict):
+        self.client.setex(f"agent:session:{session_id}", self.ttl_seconds, json.dumps(self._encode(value), ensure_ascii=False, default=str))
 
 
 class AgentState(TypedDict):
@@ -493,13 +548,12 @@ def _diagnose_and_respond(
     
     symptoms = symptoms[:5]
     
-    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ====== 知识图谱查询 ======")
-    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 查询症状: {symptoms}")
+    logger.info("agent_kg_query_started symptom_count=%s", len(symptoms))
     
     start_time = time.time()
     kg_result = query_kg_for_symptoms(symptoms, allergy_herbs)
     kg_time = time.time() - start_time
-    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 知识图谱查询完成, 耗时={kg_time:.2f}秒")
+    logger.info("agent_kg_query_finished duration_seconds=%.2f", kg_time)
     
     kg_raw_result = kg_result.get("raw", {})
     
@@ -508,7 +562,7 @@ def _diagnose_and_respond(
     herbs_list = kg_result.get("herbs", [])
     warnings_list = kg_result.get("warnings", [])
     
-    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] KG结果: prescriptions={len(prescription_list)}, zheng={len(zheng_list)}, herbs={len(herbs_list)}")
+    logger.info("agent_kg_result prescription_count=%s syndrome_count=%s herb_count=%s", len(prescription_list), len(zheng_list), len(herbs_list))
     
     safe_prescriptions = []
     unsafe_prescriptions = []
@@ -671,8 +725,8 @@ def _diagnose_and_respond(
         if not precautions:
             precautions = result.get("precautions", "")
         response = result.get("response", "")
-    except Exception as e:
-        print(f"诊断+回复LLM错误: {e}")
+    except Exception as exc:
+        logger.warning("diagnosis_response_generation_failed error=%s", type(exc).__name__)
         try:
             response_raw = _get_llm_32b().invoke(prompt.invoke({}))
             response_text = response_raw.content if hasattr(response_raw, 'content') else str(response_raw)
@@ -689,8 +743,8 @@ def _diagnose_and_respond(
                 response = resp_match.group(1).replace('\\"', '"').replace('\\n', '\n')
             else:
                 response = response_text
-        except Exception as e2:
-            print(f"备用方案也失败: {e2}")
+        except Exception as exc:
+            logger.warning("diagnosis_response_fallback_failed error=%s", type(exc).__name__)
             response_parts = []
             response_parts.append(f"根据您的症状，主要表现为{syndrome}。")
             if prescription_name == "无最佳匹配方剂":
@@ -725,7 +779,7 @@ def _diagnose_and_respond(
 
 
 def supervisor_node(state: AgentState) -> AgentState:
-    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ====== Supervisor 节点 ======")
+    logger.info("agent_supervisor_started")
 
     recent_messages = state["messages"][-10:] if state["messages"] else []
     history_str = "\n".join([f"{m.type}: {m.content}" for m in recent_messages])
@@ -739,7 +793,7 @@ def supervisor_node(state: AgentState) -> AgentState:
     )
 
     intent = decision.intent
-    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Supervisor 决策: intent={intent}, query_target={decision.query_target}")
+    logger.info("agent_supervisor_decision intent=%s", intent)
     ask_round = state.get("ask_round", 0)
     refuse_count = state.get("refuse_count", 0)
 
@@ -751,7 +805,7 @@ def supervisor_node(state: AgentState) -> AgentState:
     _has_dept_inquiry = any(kw in _user_input for kw in _dept_keywords)
     if _has_dept_inquiry and intent not in ("custom_query", "medical_case"):
         intent = "department_inquiry"
-        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 代码兜底：检测到挂号/科室咨询，覆盖为 department_inquiry")
+        logger.info("agent_supervisor_department_fallback")
 
     # 用户拒绝/强制诊断判断交由 LLM 完成（decision.user_explicit_stop / decision.user_refused / decision.force_diagnosis）
     force_diagnosis = False
@@ -769,7 +823,7 @@ def supervisor_node(state: AgentState) -> AgentState:
         if has_symptoms:
             intent = "diagnosis"
             force_diagnosis = True
-            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 用户明确拒绝/结束，直接强制诊断")
+            logger.info("agent_supervisor_force_diagnosis")
 
     ask_round += 1
 
@@ -806,11 +860,11 @@ def supervisor_node(state: AgentState) -> AgentState:
                 missing_info=missing_info,
                 user_refused=merged_refused,
             )
-            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Supervisor提取并合并: symptoms={merged_symptoms}, tongue={merged_tongue}, pulse={merged_pulse}")
+            logger.info("agent_symptoms_merged symptom_count=%s has_tongue=%s has_pulse=%s", len(merged_symptoms), bool(merged_tongue), bool(merged_pulse))
 
             # 如果用户已明确拒绝提供舌象脉象，且有症状，直接强制诊断
             if merged_symptoms and (decision.user_explicit_stop or decision.user_refused or merged_refused):
-                print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 合并后用户已拒绝，强制诊断")
+                logger.info("agent_supervisor_force_diagnosis_after_merge")
                 intent = "diagnosis"
                 force_diagnosis = True
 
@@ -849,13 +903,13 @@ def supervisor_node(state: AgentState) -> AgentState:
         else:
             # 首次提取
             updated_symptoms_info = new_si
-            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Supervisor首次提取: symptoms={new_si.symptoms}, tongue={new_si.tongue}, pulse={new_si.pulse}")
+            logger.info("agent_symptoms_extracted symptom_count=%s has_tongue=%s has_pulse=%s", len(new_si.symptoms), bool(new_si.tongue), bool(new_si.pulse))
 
             # 首次提取时，如果用户已明确拒绝提供舌象脉象，且有症状，直接强制诊断
             symptoms_str = "、".join(new_si.symptoms[:5]) if new_si.symptoms else ""
             is_doctor_scene = state.get("scene") == "doctor"
             if new_si.symptoms and (decision.user_explicit_stop or decision.user_refused or new_si.user_refused):
-                print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 首次提取后用户已拒绝，强制诊断")
+                logger.info("agent_supervisor_force_diagnosis_after_initial_extract")
                 intent = "diagnosis"
                 force_diagnosis = True
             # 首次提问时，如果已有症状但缺舌象脉象，根据场景使用不同话术
@@ -906,20 +960,18 @@ def supervisor_node(state: AgentState) -> AgentState:
 
 
 def extract_symptoms_node(state: AgentState) -> AgentState:
-    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ====== 症状提取节点 ======")
+    logger.info("agent_symptom_extraction_started")
     
     recent_messages = state["messages"][-10:] if state["messages"] else []
     history_str = "\n".join([f"{m.type}: {m.content}" for m in recent_messages])
     
     new_si = _extract_symptoms_llm(state["user_input"], history_str)
     
-    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 提取症状: symptoms={new_si.symptoms}, tongue={new_si.tongue}, pulse={new_si.pulse}, is_complete={new_si.is_complete}")
+    logger.info("agent_symptom_extraction_finished symptom_count=%s has_tongue=%s has_pulse=%s complete=%s", len(new_si.symptoms), bool(new_si.tongue), bool(new_si.pulse), new_si.is_complete)
     
     existing_si = state.get("symptoms_info")
     
-    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 现有症状信息: existing_si={existing_si}")
-    if existing_si:
-        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 现有: symptoms={existing_si.symptoms}, tongue={existing_si.tongue}, pulse={existing_si.pulse}")
+    logger.info("agent_existing_symptoms present=%s", bool(existing_si))
     
     if existing_si and isinstance(existing_si, SymptomsInfo):
         merged_symptoms = list(set((existing_si.symptoms or []) + (new_si.symptoms or [])))
@@ -927,7 +979,7 @@ def extract_symptoms_node(state: AgentState) -> AgentState:
         merged_pulse = existing_si.pulse or new_si.pulse
         merged_refused = existing_si.user_refused or new_si.user_refused
         
-        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 合并后: symptoms={merged_symptoms}, tongue={merged_tongue}, pulse={merged_pulse}")
+        logger.info("agent_symptoms_merged symptom_count=%s has_tongue=%s has_pulse=%s", len(merged_symptoms), bool(merged_tongue), bool(merged_pulse))
         
         missing_items = []
         if not merged_tongue:
@@ -960,11 +1012,11 @@ def extract_symptoms_node(state: AgentState) -> AgentState:
 def diagnosis_and_response_node(state: AgentState) -> AgentState:
     """合并：诊断 + 回复生成（单次 LLM 调用）"""
     
-    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ====== 诊断节点 ======")
+    logger.info("agent_diagnosis_started")
     
     si = state.get("symptoms_info")
     if not si or not isinstance(si, SymptomsInfo):
-        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 缺少症状信息")
+        logger.info("agent_diagnosis_skipped reason=missing_symptoms")
         return {
             **state,
             "final_response": "未提供症状信息，无法进行诊断。",
@@ -972,7 +1024,7 @@ def diagnosis_and_response_node(state: AgentState) -> AgentState:
             "is_diagnosed": True,
         }
     
-    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 开始诊断: symptoms={si.symptoms}, tongue={si.tongue}, pulse={si.pulse}")
+    logger.info("agent_diagnosis_input symptom_count=%s has_tongue=%s has_pulse=%s", len(si.symptoms), bool(si.tongue), bool(si.pulse))
     
     diagnosis_result, kg_raw_result, response_text = _diagnose_and_respond(
         symptoms=si.symptoms,
@@ -984,7 +1036,7 @@ def diagnosis_and_response_node(state: AgentState) -> AgentState:
         mode=state["mode"],
     )
     
-    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 诊断完成: syndrome={diagnosis_result.syndrome}, prescription={diagnosis_result.prescription}")
+    logger.info("agent_diagnosis_finished")
     
     return {
         **state,
@@ -1867,9 +1919,9 @@ def department_inquiry_node(state: AgentState) -> AgentState:
             new_si = _extract_symptoms_llm(state["user_input"], history_str)
             if new_si and new_si.symptoms:
                 si = new_si
-                print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] department_inquiry 提取症状: {si.symptoms}")
-        except Exception as e:
-            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] department_inquiry 提取症状失败: {e}")
+                logger.info("department_inquiry_symptoms_extracted symptom_count=%s", len(si.symptoms))
+        except Exception as exc:
+            logger.warning("department_inquiry_symptom_extraction_failed error=%s", type(exc).__name__)
     
     symptoms = si.symptoms if si and isinstance(si, SymptomsInfo) and si.symptoms else []
 
@@ -1919,8 +1971,8 @@ def department_inquiry_node(state: AgentState) -> AgentState:
         messages = [SystemMessage(content=system_prompt), HumanMessage(content=state["user_input"])]
         response = llm.invoke(messages)
         response_text = response.content if hasattr(response, 'content') else str(response)
-    except Exception as e:
-        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] department_inquiry_node error: {e}")
+    except Exception as exc:
+        logger.warning("department_inquiry_failed error=%s", type(exc).__name__)
         if symptoms:
             response_text = "根据您的症状，建议您到医院咨询导诊台，或挂中医内科进行进一步诊治。"
         else:
@@ -2005,48 +2057,11 @@ def build_graph():
         }
     )
 
-    memory = MemorySaver()
-    app = workflow.compile(checkpointer=memory)
-
-    return app
+    # 不使用 MemorySaver：其检查点没有 TTL，会随新 session 无限增长。
+    return workflow.compile()
 
 
-_SESSIONS: Dict[str, Dict[str, Any]] = {}
-_SESSION_MAX_AGE = 3600 
-_SESSION_CLEANUP_INTERVAL = 600 
-
-
-def _cleanup_expired_sessions():
-    """定时清理过期会话"""
-    global _SESSIONS
-    current_time = time.time()
-    expired_keys = []
-    
-    for session_id, session_data in _SESSIONS.items():
-        last_access_time = session_data.get("last_access_time", 0)
-        if current_time - last_access_time > _SESSION_MAX_AGE:
-            expired_keys.append(session_id)
-    
-    for key in expired_keys:
-        del _SESSIONS[key]
-    
-    if expired_keys:
-        print(f"Cleaned up {len(expired_keys)} expired sessions")
-
-
-def _start_session_cleanup_daemon():
-    """启动会话清理守护线程"""
-    def cleanup_loop():
-        while True:
-            _cleanup_expired_sessions()
-            time.sleep(_SESSION_CLEANUP_INTERVAL)
-    
-    daemon_thread = threading.Thread(target=cleanup_loop, daemon=True)
-    daemon_thread.start()
-    print("Session cleanup daemon started")
-
-
-_start_session_cleanup_daemon()
+_SESSIONS = RedisSessionStore(ttl_seconds=int(os.getenv("AGENT_SESSION_TTL_SECONDS", "3600")))
 
 
 app = build_graph()
@@ -2055,10 +2070,7 @@ app = build_graph()
 def tcm_agent_stream_chat(session_id: str, patient_id: str, user_input: str, mode: str = "normal", scene: str = "guide", patient_profile: Optional[Dict[str, Any]] = None):
     """流式版本：先获取基础信息，然后逐字生成回答"""
     from langchain_core.messages import HumanMessage
-    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ====== 开始流式对话 ======")
-    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] session_id={session_id}, patient_id={patient_id}")
-    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] user_input={user_input[:100]}")
-    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] mode={mode}, scene={scene}")
+    logger.info("agent_stream_started mode=%s scene=%s input_length=%s", mode, scene, len(user_input))
 
     config = {"configurable": {"thread_id": session_id}}
 
@@ -2114,16 +2126,14 @@ def tcm_agent_stream_chat(session_id: str, patient_id: str, user_input: str, mod
         "department_hint": existing_state.get("department_hint"),
     }
 
-    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ====== 调用 Agent 获取基础信息 ======")
+    logger.info("agent_stream_invoking")
 
     try:
         result = app.invoke(inputs, config)
-        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ====== Agent 调用完成 ======")
-        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] intent={result.get('intent')}")
-    except Exception as e:
-        error_detail = traceback.format_exc()
-        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] tcm_agent_stream_chat error: {error_detail}")
-        yield f"data: {json.dumps({'code': 500, 'data': {'status': 'error', 'response': f'处理失败：{str(e)}', 'finish': False}}, ensure_ascii=False)}\n\n"
+        logger.info("agent_stream_finished intent=%s", result.get("intent"))
+    except Exception:
+        logger.exception("agent_stream_failed")
+        yield f"data: {json.dumps({'code': 500, 'data': {'status': 'error', 'response': '智能助手暂不可用，请稍后再试', 'finish': False}}, ensure_ascii=False)}\n\n"
         yield "data: [DONE]\n\n"
         return
 
@@ -2328,11 +2338,35 @@ def tcm_agent_stream_chat(session_id: str, patient_id: str, user_input: str, mod
     yield "data: [DONE]\n\n"
 
 
+def _build_public_trace(state: Dict[str, Any]) -> Dict[str, Any]:
+    """生成可展示的执行摘要，不包含模型原始推理文本。"""
+    symptoms_info = state.get("symptoms_info")
+    symptoms = symptoms_info.symptoms if isinstance(symptoms_info, SymptomsInfo) else []
+    steps = [{"title": "症状信息整理", "detail": f"已识别 {len(symptoms)} 项症状" if symptoms else "等待补充症状信息"}]
+    tools = []
+
+    if state.get("intent") == "ask":
+        steps.append({"title": "补充信息评估", "detail": "当前信息不足，已生成补充问题"})
+    elif state.get("diagnosis_result"):
+        steps.append({"title": "初步挂号建议", "detail": "已基于现有症状生成建议，结果仅供就诊参考"})
+        kg_data = state.get("kg_raw_result") or {}
+        if isinstance(kg_data, dict):
+            counts = []
+            for key, label in (("prescriptions", "方剂"), ("zheng", "证型"), ("herbs", "药材")):
+                value = kg_data.get(key)
+                if isinstance(value, list):
+                    counts.append(f"{label} {len(value)} 条")
+            tools.append({
+                "name": "中医知识图谱查询",
+                "status": "已完成",
+                "detail": "；".join(counts) if counts else "未匹配到可用条目",
+            })
+
+    return {"steps": steps, "tools": tools}
+
+
 def tcm_agent_chat(session_id: str, patient_id: str, user_input: str, mode: str = "normal", scene: str = "guide", patient_profile: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ====== 开始对话 ======")
-    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] session_id={session_id}, patient_id={patient_id}")
-    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] user_input={user_input[:100]}")
-    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] mode={mode}, scene={scene}")
+    logger.info("agent_chat_started mode=%s scene=%s input_length=%s", mode, scene, len(user_input))
 
     import json
     config = {"configurable": {"thread_id": session_id}}
@@ -2347,11 +2381,7 @@ def tcm_agent_chat(session_id: str, patient_id: str, user_input: str, mode: str 
 
     existing_state = _SESSIONS.get(session_id, {})
 
-    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ====== 读取session状态 ======")
-    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] existing_state keys: {list(existing_state.keys())}")
-    if existing_state.get("symptoms_info"):
-        si = existing_state["symptoms_info"]
-        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 已有symptoms_info: symptoms={si.symptoms}, tongue={si.tongue}, pulse={si.pulse}")
+    logger.info("agent_session_loaded has_symptoms=%s", bool(existing_state.get("symptoms_info")))
 
     if mode == "follow-up" and existing_state.get("symptoms_info"):
         preserved_symptoms = existing_state["symptoms_info"]
@@ -2395,19 +2425,19 @@ def tcm_agent_chat(session_id: str, patient_id: str, user_input: str, mode: str 
         "department_hint": existing_state.get("department_hint"),
     }
 
-    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ====== 调用 Agent ======")
+    logger.info("agent_chat_invoking")
     
     try:
         result = app.invoke(inputs, config)
-        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ====== Agent 调用完成 ======")
-        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] intent={result.get('intent')}, has_diagnosis={result.get('diagnosis_result') is not None}")
-    except Exception as e:
-        error_detail = traceback.format_exc()
-        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] tcm_agent_chat error: {error_detail}")
+        logger.info("agent_chat_finished intent=%s has_diagnosis=%s", result.get("intent"), result.get("diagnosis_result") is not None)
+    except Exception:
+        logger.exception("agent_chat_failed")
         return {
             "status": "error",
-            "response": f"处理失败：{str(e)}",
+            "response": "智能助手暂不可用，请稍后再试",
         }
+
+    public_trace = _build_public_trace(result)
 
     if result.get("intent") == "ask":
         si = result.get("symptoms_info")
@@ -2426,21 +2456,22 @@ def tcm_agent_chat(session_id: str, patient_id: str, user_input: str, mode: str 
                 "status": "done",
                 "response": ask_q,
                 "finish": True,
+                "trace": public_trace,
             }
         _SESSIONS[session_id] = session_data
 
-        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ====== 保存session状态 ======")
         si = session_data.get("symptoms_info")
         if si and isinstance(si, SymptomsInfo):
-            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 保存symptoms_info: symptoms={si.symptoms}, tongue={si.tongue}, pulse={si.pulse}")
+            logger.info("agent_session_saved symptom_count=%s has_tongue=%s has_pulse=%s", len(si.symptoms), bool(si.tongue), bool(si.pulse))
         else:
-            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] symptoms_info为空或类型错误: {type(si)}")
+            logger.info("agent_session_saved has_symptoms=false")
 
         return {
             "status": "asking",
             "response": ask_q,
             "symptoms_info": si.dict() if isinstance(si, SymptomsInfo) else {},
             "finish": False,
+            "trace": public_trace,
         }
     
     if result.get("final_response"):
@@ -2459,6 +2490,7 @@ def tcm_agent_chat(session_id: str, patient_id: str, user_input: str, mode: str 
                 "status": "query_answer",
                 "response": result["final_response"],
                 "finish": False,
+                "trace": public_trace,
             }
         if diagnosis:
             return {
@@ -2474,6 +2506,7 @@ def tcm_agent_chat(session_id: str, patient_id: str, user_input: str, mode: str 
                     "precautions": diagnosis.precautions if diagnosis else "",
                 } if diagnosis else {},
                 "finish": True,
+                "trace": public_trace,
             }
         
         if session_data.get("is_diagnosed"):
@@ -2481,12 +2514,14 @@ def tcm_agent_chat(session_id: str, patient_id: str, user_input: str, mode: str 
                 "status": "done",
                 "response": result["final_response"],
                 "finish": True,
+                "trace": public_trace,
             }
         
         return {
             "status": "done",
             "response": result["final_response"],
             "finish": False,
+            "trace": public_trace,
         }
     
     session_data = {
@@ -2522,4 +2557,4 @@ if __name__ == "__main__":
         scene="guide",
         patient_profile=patient_profile,
     )
-    print(result)
+    logger.info("agent_manual_check_completed status=%s", result.get("status"))

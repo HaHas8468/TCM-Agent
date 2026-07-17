@@ -5,21 +5,14 @@ const neo4j = require("neo4j-driver");
 const DEFAULT_LIMIT = 10;
 const MAX_LIMIT = 50;
 
-const DEFAULT_NEO4J_CONFIG = Object.freeze({
-  uri: "neo4j+s://0d140a6a.databases.neo4j.io",
-  username: "0d140a6a",
-  password: "vO4BF5hKII8Sc7eVyC7-H5wE_i9rbFrLHUSLgXV2q20",
-  database: "0d140a6a",
-});
-
 let driver;
 
 function getKnowledgeGraphConfig() {
   return {
-    uri: process.env.NEO4J_URI || DEFAULT_NEO4J_CONFIG.uri,
-    username: process.env.NEO4J_USERNAME || DEFAULT_NEO4J_CONFIG.username,
-    password: process.env.NEO4J_PASSWORD || DEFAULT_NEO4J_CONFIG.password,
-    database: process.env.NEO4J_DATABASE || DEFAULT_NEO4J_CONFIG.database,
+    uri: process.env.NEO4J_URI,
+    username: process.env.NEO4J_USERNAME || process.env.NEO4J_USER,
+    password: process.env.NEO4J_PASSWORD,
+    database: process.env.NEO4J_DATABASE,
     limit: asLimit(process.env.KG_QUERY_LIMIT, DEFAULT_LIMIT),
   };
 }
@@ -283,21 +276,9 @@ ${formulaReturn(", matchedSymptoms: matchedSymptoms, matchedQueryTerms: matchedQ
 `;
 
 async function healthCheck() {
-  const rows = await readQuery(
-    `
-    CALL {
-      MATCH (n)
-      RETURN count(n) AS nodes
-    }
-    CALL {
-      MATCH ()-[r]->()
-      RETURN count(r) AS relationships
-    }
-    RETURN true AS connected, $database AS database, nodes, relationships
-    `,
-    { database: getKnowledgeGraphConfig().database },
-  );
-  return { ok: true, query: "healthCheck", data: rows[0] || {} };
+  const config = getKnowledgeGraphConfig();
+  await getDriver().verifyConnectivity();
+  return { ok: true, query: "healthCheck", data: { connected: true, database: config.database || "default" } };
 }
 
 async function graphSummary() {

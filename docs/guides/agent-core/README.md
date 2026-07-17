@@ -23,11 +23,11 @@
 ```
 g:\中医药agent\
 ├── tcm_agent.py            # ★ Agent 核心（LangGraph 图 + 对外函数）
-├── kg_service.py           # 知识图谱服务封装（neo4j_main / neo4j_case）
+├── kg_service.py           # 知识图谱 HTTP 客户端封装
 ├── requirements.txt        # Python 依赖
 ├── 需求.txt                 # 产品需求文档（中文）
-├── neo4j_main/             # 中药/方剂/证型图谱（Node.js 服务，subprocess 调用）
-└── neo4j_case/             # 经典医案图谱（Node.js 服务，subprocess 调用）
+├── neo4j_main/             # 中药/方剂/证型图谱查询模块
+└── neo4j_case/             # 经典医案图谱查询模块
 ```
 
 ---
@@ -41,11 +41,11 @@ g:\中医药agent\
   pip install -r requirements.txt
   ```
 
-### 3.2 Node.js 子服务
-两个知识图谱服务（`neo4j_main`、`neo4j_case`）是 Node.js 实现的，通过 `subprocess` 调用：
-- **运行环境**：Node.js 16+（测试环境 v22+）
-- **无需后端手工启动**：`kg_service.py` 内部会按需 spawn Node 进程调用
-- **依赖配置**：两个目录各自维护 Neo4j 连接配置（详见各自 README）
+### 3.2 Node.js 图谱服务
+主图谱和医案图谱由 Compose 中的常驻 `kg` 服务统一承载，复用 Neo4j 连接；Python 不再为每个请求启动 Node 进程。
+- **Docker 部署**：执行 `docker compose up -d` 会自动构建并启动 `kg`，仅在内部网络暴露 `3000` 端口。
+- **本地非 Docker 调试**：需要手动启动 `knowledge_graph_service/server.js`，并令 `KG_SERVICE_BASE_URL` 指向该服务。
+- **容量控制**：通过 `KG_SERVICE_TIMEOUT_SECONDS`、`KG_MAX_CONCURRENCY` 和 `KG_NODE_MAX_CONCURRENCY` 调整超时与并发。
 
 ### 3.3 环境变量（.env）
 后端部署时需要将 `.env` 拷贝到运行目录：
@@ -61,6 +61,12 @@ NEO4J_URI=neo4j://127.0.0.1:7687
 NEO4J_USERNAME=neo4j
 NEO4J_PASSWORD=xxxx
 NEO4J_DATABASE=neo4j
+
+# 常驻知识图谱服务（Docker 默认值）
+KG_SERVICE_BASE_URL=http://kg:3000
+KG_SERVICE_TIMEOUT_SECONDS=20
+KG_MAX_CONCURRENCY=2
+KG_NODE_MAX_CONCURRENCY=4
 ```
 
 > ⚠️ **不要把真实 .env 提交到代码仓库**！建议运维侧用环境变量/K8s Secret 注入。

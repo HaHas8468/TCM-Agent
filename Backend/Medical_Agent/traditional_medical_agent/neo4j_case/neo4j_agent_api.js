@@ -1,18 +1,11 @@
 const neo4j = require("neo4j-driver");
 const crypto = require("crypto");
 
-const DEFAULT_CONFIG = Object.freeze({
-  uri: "neo4j+s://611304ef.databases.neo4j.io",
-  username: "611304ef",
-  password: "zctO2g1j3FahIfnrN-zs0KnA88DHlgK3nSW5Fw1X-CY",
-  database: "611304ef",
-});
-
 const CONFIG = Object.freeze({
-  uri: process.env.NEO4J_URI || DEFAULT_CONFIG.uri,
-  username: process.env.NEO4J_USERNAME || DEFAULT_CONFIG.username,
-  password: process.env.NEO4J_PASSWORD || DEFAULT_CONFIG.password,
-  database: process.env.NEO4J_DATABASE || DEFAULT_CONFIG.database,
+  uri: process.env.NEO4J_CASE_URI,
+  username: process.env.NEO4J_CASE_USERNAME,
+  password: process.env.NEO4J_CASE_PASSWORD,
+  database: process.env.NEO4J_CASE_DATABASE,
 });
 
 const DEFAULT_LIMIT = 10;
@@ -20,6 +13,9 @@ const MAX_LIMIT = 50;
 let driver;
 
 function getDriver() {
+  if (!CONFIG.uri || !CONFIG.username || !CONFIG.password || !CONFIG.database) {
+    throw new Error("NEO4J_CASE_URI、NEO4J_CASE_USERNAME、NEO4J_CASE_PASSWORD、NEO4J_CASE_DATABASE 必须配置");
+  }
   if (!driver) {
     driver = neo4j.driver(CONFIG.uri, neo4j.auth.basic(CONFIG.username, CONFIG.password));
   }

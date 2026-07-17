@@ -2,15 +2,17 @@ import os
 import sys
 import logging
 import asyncio
+import anyio
+import secrets
+import json
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request, Depends
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, HTTPException, Request, Depends, Query
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any, AsyncGenerator
 
 import sys
@@ -36,29 +38,25 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="中医药诊疗智能体 - Agent服务", version="1.0.0")
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 API_KEY = os.getenv('AGENT_API_KEY', '')
+AGENT_TIMEOUT_SECONDS = int(os.getenv("AGENT_TIMEOUT_SECONDS", "90"))
+AGENT_STREAM_CHUNK_SIZE = max(1, int(os.getenv("AGENT_STREAM_CHUNK_SIZE", "12")))
+AGENT_STREAM_CHUNK_DELAY_SECONDS = max(0.01, float(os.getenv("AGENT_STREAM_CHUNK_DELAY_SECONDS", "0.06")))
+agent_limiter = anyio.CapacityLimiter(int(os.getenv("AGENT_MAX_CONCURRENCY", "4")))
 
 
 async def verify_api_key(request: Request):
     if not API_KEY:
-        return
+        raise HTTPException(status_code=503, detail="Agent 服务配置不完整")
     api_key = request.headers.get('X-API-Key')
-    if api_key != API_KEY:
+    if not api_key or not secrets.compare_digest(api_key, API_KEY):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     start_time = datetime.now()
-    logger.info(f"Agent Request: {request.method} {request.url}")
+    logger.info("agent_request method=%s path=%s", request.method, request.url.path)
     
     try:
         response = await call_next(request)
@@ -67,42 +65,58 @@ async def log_requests(request: Request, call_next):
         return response
     except Exception as e:
         process_time = (datetime.now() - start_time).total_seconds()
-        logger.error(f"Agent Error: {str(e)} - {process_time:.2f}s")
+        logger.exception("agent_request_failed duration=%.2fs", process_time)
         return JSONResponse(
             status_code=500,
-            content={"error": "Internal server error", "detail": str(e)}
+            content={"error": "Internal server error"}
         )
 
 
 class AgentInput(BaseModel):
-    session_id: str
-    patient_id: str
-    user_input: str
-    mode: str = "normal"
-    scene: str = "guide"
+    session_id: str = Field(min_length=1, max_length=128)
+    patient_id: str = Field(min_length=1, max_length=50)
+    user_input: str = Field(min_length=1, max_length=4000)
+    mode: str = Field(default="normal", max_length=30)
+    scene: str = Field(default="guide", max_length=30)
     patient_profile: Optional[Dict[str, Any]] = None
 
 
 class DiagnosisInput(BaseModel):
-    symptoms: List[str]
-    tongue: Optional[List[str]] = []
-    pulse: Optional[List[str]] = []
-    other_signs: Optional[str] = ""
+    symptoms: List[str] = Field(min_length=1, max_length=20)
+    tongue: Optional[List[str]] = Field(default_factory=list, max_length=20)
+    pulse: Optional[List[str]] = Field(default_factory=list, max_length=20)
+    other_signs: Optional[str] = Field(default="", max_length=2000)
 
 
 class KnowledgeQueryInput(BaseModel):
-    query_type: str
-    keyword: Optional[str] = ""
-    params: Optional[Dict[str, Any]] = {}
+    query_type: str = Field(min_length=1, max_length=50)
+    keyword: Optional[str] = Field(default="", max_length=500)
+    params: Optional[Dict[str, Any]] = None
+
+
+async def run_agent_chat(input_data: AgentInput) -> Dict[str, Any]:
+    def invoke():
+        return tcm_agent_chat(
+            session_id=input_data.session_id,
+            patient_id=input_data.patient_id,
+            user_input=input_data.user_input,
+            mode=input_data.mode,
+            scene=input_data.scene,
+            patient_profile=input_data.patient_profile,
+        )
+    with anyio.fail_after(AGENT_TIMEOUT_SECONDS):
+        return await anyio.to_thread.run_sync(invoke, limiter=agent_limiter)
 
 
 @app.on_event("startup")
 async def startup_event():
+    if not API_KEY or not os.getenv("REDIS_URL"):
+        raise RuntimeError("AGENT_API_KEY 或 REDIS_URL 未配置")
     try:
         neo4j_conn.connect()
         logger.info("Neo4j connection established successfully")
     except Exception as e:
-        logger.error(f"Failed to connect to Neo4j: {str(e)}")
+        logger.exception("Neo4j connection failed")
 
 
 @app.on_event("shutdown")
@@ -110,8 +124,8 @@ async def shutdown_event():
     try:
         neo4j_conn.close()
         logger.info("Neo4j connection closed")
-    except Exception as e:
-        logger.error(f"Failed to close Neo4j connection: {str(e)}")
+    except Exception:
+        logger.exception("neo4j_connection_close_failed")
 
 
 @app.get("/health")
@@ -122,15 +136,7 @@ async def health_check():
 @app.post("/agent/chat")
 async def agent_chat(input_data: AgentInput, _=Depends(verify_api_key)):
     try:
-        logger.info(f"Agent chat request: session={input_data.session_id}, patient={input_data.patient_id}")
-        result = tcm_agent_chat(
-            session_id=input_data.session_id,
-            patient_id=input_data.patient_id,
-            user_input=input_data.user_input,
-            mode=input_data.mode,
-            scene=input_data.scene,
-            patient_profile=input_data.patient_profile
-        )
+        result = await run_agent_chat(input_data)
         
         if result.get("status") == "diagnosed" and input_data.scene == "doctor":
             diagnosis_result = result.get("diagnosis_result", {})
@@ -164,76 +170,78 @@ async def agent_chat(input_data: AgentInput, _=Depends(verify_api_key)):
                         result["diagnosis_result"]["similar_cases"] = similar_cases
         
         return result
-    except Exception as e:
-        logger.error(f"agent_chat error: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        logger.exception("agent_chat failed")
+        raise HTTPException(status_code=502, detail="智能助手暂不可用")
 
 
 @app.post("/agent/classify")
 async def agent_classify(input_data: AgentInput, _=Depends(verify_api_key)):
     try:
-        logger.info(f"Agent classify request: session={input_data.session_id}")
-        result = tcm_agent_chat(
-            session_id=input_data.session_id,
-            patient_id=input_data.patient_id,
-            user_input=input_data.user_input,
-            mode=input_data.mode,
-            scene=input_data.scene,
-            patient_profile=input_data.patient_profile
-        )
+        result = await run_agent_chat(input_data)
         return result
-    except Exception as e:
-        logger.error(f"agent_classify error: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        logger.exception("agent_classify failed")
+        raise HTTPException(status_code=502, detail="智能助手暂不可用")
 
 
 @app.post("/agent/recommend")
 async def agent_recommend(input_data: AgentInput, _=Depends(verify_api_key)):
     try:
-        logger.info(f"Agent recommend request: session={input_data.session_id}")
-        result = tcm_agent_chat(
-            session_id=input_data.session_id,
-            patient_id=input_data.patient_id,
-            user_input=input_data.user_input,
-            mode=input_data.mode,
-            scene=input_data.scene,
-            patient_profile=input_data.patient_profile
-        )
+        result = await run_agent_chat(input_data)
         return result
-    except Exception as e:
-        logger.error(f"agent_recommend error: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        logger.exception("agent_recommend failed")
+        raise HTTPException(status_code=502, detail="智能助手暂不可用")
 
 
-async def generate_stream_response(user_input: str) -> AsyncGenerator[str, None]:
+async def generate_stream_response(input_data: AgentInput) -> AsyncGenerator[str, None]:
     try:
-        result = tcm_agent_chat(
-            session_id="stream_session",
-            patient_id="stream_patient",
-            user_input=user_input,
-            mode="normal",
-            scene="guide"
-        )
+        # 先推送一个可见的执行阶段，避免前端只能等同步 Agent 完成后一次性得到全部摘要。
+        initial_trace = {
+            "steps": [{"title": "症状信息整理", "detail": "正在分析本次描述中的症状信息"}],
+            "tools": [],
+        }
+        yield f"data: {json.dumps({'event': 'trace', 'trace': initial_trace}, ensure_ascii=False)}\n\n"
+        result = await run_agent_chat(input_data)
         response_text = str(result.get("response", str(result)))
-        chunks = [response_text[i:i+100] for i in range(0, len(response_text), 100)]
+        chunks = [response_text[i:i + AGENT_STREAM_CHUNK_SIZE] for i in range(0, len(response_text), AGENT_STREAM_CHUNK_SIZE)]
         for chunk in chunks:
-            await asyncio.sleep(0.05)
-            yield chunk
-    except Exception as e:
-        yield f"Error: {str(e)}"
+            await asyncio.sleep(AGENT_STREAM_CHUNK_DELAY_SECONDS)
+            # 前端 SSE 解析器只处理 data: 帧；裸文本会被静默丢弃并最终视为异常结束。
+            payload = {
+                "status": result.get("status", "done"),
+                "response": chunk,
+                "finish": False,
+            }
+            yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+        final_payload = {
+            "status": result.get("status", "done"),
+            "finish": True,
+        }
+        if result.get("diagnosis_result"):
+            final_payload["diagnosis"] = result["diagnosis_result"]
+        if result.get("trace"):
+            final_payload["trace"] = result["trace"]
+        yield f"data: {json.dumps(final_payload, ensure_ascii=False)}\n\n"
+        yield "data: [DONE]\n\n"
+    except Exception:
+        logger.exception("agent_stream failed")
+        yield "data: {\"code\":502,\"data\":{\"status\":\"error\",\"response\":\"智能助手暂不可用\"}}\n\n"
+        yield "data: [DONE]\n\n"
 
 
 @app.post("/agent/stream")
 async def agent_stream(input_data: AgentInput, _=Depends(verify_api_key)):
     try:
-        logger.info(f"Agent stream request: session={input_data.session_id}")
         return StreamingResponse(
-            generate_stream_response(input_data.user_input),
+            generate_stream_response(input_data),
             media_type="text/event-stream"
         )
-    except Exception as e:
-        logger.error(f"agent_stream error: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        logger.exception("agent_stream initialization failed")
+        raise HTTPException(status_code=502, detail="智能助手暂不可用")
 
 
 @app.post("/diagnosis/classify")
@@ -241,13 +249,11 @@ async def classify_zheng(input_data: DiagnosisInput, _=Depends(verify_api_key)):
     try:
         kg_results = DiagnosisQueries.get_zheng_by_symptoms(input_data.symptoms)
         
-        result = tcm_agent_chat(
+        result = await run_agent_chat(AgentInput(
             session_id="diagnosis_classify",
             patient_id="classify_patient",
             user_input=f"症状：{', '.join(input_data.symptoms)}，舌象：{', '.join(input_data.tongue)}，脉象：{', '.join(input_data.pulse)}，其他体征：{input_data.other_signs}",
-            mode="normal",
-            scene="guide"
-        )
+        ))
         
         diagnosis_result = result.get("diagnosis_result", {})
         
@@ -258,25 +264,23 @@ async def classify_zheng(input_data: DiagnosisInput, _=Depends(verify_api_key)):
             "reasoning": diagnosis_result.get('reasoning', ''),
             "knowledge_graph_matches": kg_results
         }
-    except Exception as e:
-        logger.error(f"classify_zheng error: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        logger.exception("classify_zheng failed")
+        raise HTTPException(status_code=502, detail="诊断服务暂不可用")
 
 
 @app.post("/diagnosis/extract-entities")
-async def extract_entities(text: str, _=Depends(verify_api_key)):
+async def extract_entities(text: str = Query(min_length=1, max_length=4000), _=Depends(verify_api_key)):
     try:
-        result = tcm_agent_chat(
+        result = await run_agent_chat(AgentInput(
             session_id="extract_entities",
             patient_id="entity_patient",
             user_input=f"请从以下文本中提取中医实体：{text}",
-            mode="normal",
-            scene="guide"
-        )
+        ))
         return result
-    except Exception as e:
-        logger.error(f"extract_entities error: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        logger.exception("extract_entities failed")
+        raise HTTPException(status_code=502, detail="实体提取服务暂不可用")
 
 
 @app.post("/knowledge/query")
@@ -326,9 +330,9 @@ async def knowledge_query(input_data: KnowledgeQueryInput, _=Depends(verify_api_
         return {"query_type": query_type, "data": result}
     except HTTPException:
         raise
-    except Exception as e:
-        logger.error(f"knowledge_query error: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        logger.exception("knowledge_query failed")
+        raise HTTPException(status_code=502, detail="知识图谱服务暂不可用")
 
 
 if __name__ == "__main__":

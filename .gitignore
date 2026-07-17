@@ -1,5 +1,6 @@
 # Dependencies and local environments
 node_modules/
+.node_modules-windows-backup-*/
 .venv/
 venv/
 __pycache__/
@@ -19,7 +20,7 @@ unpackage/
 
 # Local configuration and archives
 .env
-.env.*
+.env.backup.*
 *.zip
 *_token.txt
 *_pid.txt

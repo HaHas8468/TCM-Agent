@@ -6,25 +6,41 @@ import uuid
 import re
 import json
 import psutil
+from contextvars import ContextVar
 from datetime import datetime, timedelta
-from typing import Optional, List, Dict, Any, Union
+from typing import Annotated, Optional, List, Dict, Any, Union
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "traditional_medical_agent"))
 
 import uvicorn
-from fastapi import FastAPI, Header
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import create_engine, Column, Integer, String, Text, Date, DateTime, DECIMAL, JSON, Boolean, ForeignKey, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session, relationship
 from sqlalchemy.exc import SQLAlchemyError
 from dotenv import load_dotenv
 
-from remote_agent_client import remote_agent_client
-from traditional_medical_agent.tcm_agent import tcm_agent_chat
+from .remote_agent_client import remote_agent_client
+from .security import (
+    generate_token,
+    get_redis,
+    parse_token,
+    require_auth,
+    revoke_token,
+    validate_runtime_config,
+)
+from .rate_limit import (
+    limit_agent_request,
+    limit_anonymous_write,
+    limit_authenticated_write,
+    limit_login,
+    rate_limit_error_response,
+)
 from traditional_medical_agent.kg_service import search_by_doctor
 
 
@@ -51,6 +67,7 @@ DATABASE_URL = f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB
 
 engine = create_engine(DATABASE_URL, pool_pre_ping=True, pool_size=5, max_overflow=10)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+request_db_sessions: ContextVar[Optional[List[Session]]] = ContextVar("request_db_sessions", default=None)
 
 Base = declarative_base()
 
@@ -193,38 +210,15 @@ class ApiSchedule(Base):
     created_at = Column(DateTime, default=datetime.now)
 
 
-TOKENS = {}
-
-
 def get_db():
     db = SessionLocal()
+    sessions = request_db_sessions.get()
+    if sessions is not None:
+        sessions.append(db)
     try:
         yield db
     finally:
         db.close()
-
-
-def generate_token(username: str, role: str, role_id: str) -> str:
-    token = f"token_{uuid.uuid4().hex}"
-    TOKENS[token] = {
-        'username': username,
-        'role': role,
-        'role_id': role_id,
-        'expire_at': datetime.now() + timedelta(hours=24)
-    }
-    return token
-
-
-def parse_token(authorization: str) -> dict:
-    if not authorization or not authorization.startswith('Bearer '):
-        return None
-    token = authorization.replace('Bearer ', '')
-    if token not in TOKENS:
-        return None
-    if TOKENS[token]['expire_at'] < datetime.now():
-        del TOKENS[token]
-        return None
-    return TOKENS[token]
 
 
 def get_patient_profile(db: Session, patient_id: str) -> Dict[str, Any]:
@@ -237,96 +231,159 @@ def get_patient_profile(db: Session, patient_id: str) -> Dict[str, Any]:
     return {"patient_id": patient_id, "allergy_history": {"herbs": []}}
 
 
+def require_role(token_info: Dict[str, Any], *roles: str) -> None:
+    if token_info.get("role") not in roles:
+        raise HTTPException(status_code=403, detail="无权访问该资源")
+
+
+def current_doctor(db: Session, token_info: Dict[str, Any]) -> ApiDoctor:
+    require_role(token_info, "doctor")
+    doctor = db.query(ApiDoctor).filter(ApiDoctor.doctor_id == token_info["role_id"]).first()
+    if not doctor:
+        raise HTTPException(status_code=401, detail="医生账号不存在")
+    return doctor
+
+
+def current_patient(db: Session, token_info: Dict[str, Any]) -> ApiPatient:
+    require_role(token_info, "patient")
+    patient = db.query(ApiPatient).filter(ApiPatient.patient_id == token_info["role_id"]).first()
+    if not patient:
+        raise HTTPException(status_code=401, detail="患者账号不存在")
+    return patient
+
+
+def require_order_access(db: Session, order_id: str, token_info: Dict[str, Any], *, write: bool = False) -> ApiOrder:
+    order = db.query(ApiOrder).filter(ApiOrder.order_id == order_id).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="订单不存在")
+    if token_info.get("role") == "patient":
+        if write or str(order.patient_id) != str(current_patient(db, token_info).id):
+            raise HTTPException(status_code=403, detail="无权操作该订单")
+    elif token_info.get("role") == "doctor":
+        if order.doctor_id != current_doctor(db, token_info).id:
+            raise HTTPException(status_code=403, detail="无权操作该订单")
+    else:
+        raise HTTPException(status_code=403, detail="无权访问该订单")
+    return order
+
+
+def require_agent_patient_access(db: Session, patient_id: str, token_info: Dict[str, Any]) -> ApiPatient:
+    patient = db.query(ApiPatient).filter(ApiPatient.patient_id == patient_id).first()
+    if not patient:
+        raise HTTPException(status_code=404, detail="患者不存在")
+    if token_info.get("role") == "patient":
+        if patient.patient_id != token_info.get("role_id"):
+            raise HTTPException(status_code=403, detail="无权访问其他患者信息")
+    elif token_info.get("role") == "doctor":
+        doctor = current_doctor(db, token_info)
+        assigned = db.query(ApiOrder.id).filter(
+            ApiOrder.patient_id == patient.id,
+            ApiOrder.doctor_id == doctor.id,
+            ApiOrder.status.in_(["pending", "ongoing"]),
+        ).first()
+        if not assigned:
+            raise HTTPException(status_code=403, detail="仅可为当前接诊患者调用智能助手")
+    else:
+        raise HTTPException(status_code=403, detail="无权访问患者信息")
+    return patient
+
+
+ShortText = Annotated[str, Field(min_length=1, max_length=100)]
+IdentifierText = Annotated[str, Field(min_length=1, max_length=50)]
+ClinicalText = Annotated[str, Field(max_length=4000)]
+IngredientText = Annotated[str, Field(min_length=1, max_length=100)]
+
+
 class RegisterInput(BaseModel):
-    username: str
-    password: str
-    confirm_password: str
-    name: Optional[str] = None
-    phone: Optional[str] = None
+    username: Annotated[str, Field(min_length=1, max_length=150)]
+    password: Annotated[str, Field(min_length=1, max_length=256)]
+    confirm_password: Annotated[str, Field(min_length=1, max_length=256)]
+    name: Optional[ShortText] = None
+    phone: Optional[Annotated[str, Field(max_length=20)]] = None
 
 
 class LoginInput(BaseModel):
-    username: str
-    password: str
+    username: Annotated[str, Field(min_length=1, max_length=150)]
+    password: Annotated[str, Field(min_length=1, max_length=256)]
 
 
 class PatientProfileInput(BaseModel):
-    name: Optional[str] = None
-    password: Optional[str] = None
-    gender: Optional[str] = None
-    birth_date: Optional[str] = None
-    age: Optional[int] = None
-    phone: Optional[str] = None
-    allergy_history: Optional[List[str]] = None
+    name: Optional[ShortText] = None
+    password: Optional[Annotated[str, Field(min_length=1, max_length=256)]] = None
+    gender: Optional[Annotated[str, Field(max_length=10)]] = None
+    birth_date: Optional[Annotated[str, Field(pattern=r"^\d{4}-\d{2}-\d{2}$")]] = None
+    age: Optional[Annotated[int, Field(ge=0, le=150)]] = None
+    phone: Optional[Annotated[str, Field(max_length=20)]] = None
+    allergy_history: Optional[Annotated[List[IngredientText], Field(max_length=50)]] = None
 
 
 class DoctorProfileInput(BaseModel):
-    name: Optional[str] = None
-    password: Optional[str] = None
-    title: Optional[str] = None
-    hospital: Optional[str] = None
-    department_id: Optional[int] = None
-    license_number: Optional[str] = None
-    specialty: Optional[str] = None
-    experience: Optional[int] = None
-    phone: Optional[str] = None
-    duty_time: Optional[str] = None
-    bio: Optional[str] = None
-    description: Optional[str] = None
+    name: Optional[ShortText] = None
+    password: Optional[Annotated[str, Field(min_length=1, max_length=256)]] = None
+    title: Optional[Annotated[str, Field(max_length=50)]] = None
+    hospital: Optional[Annotated[str, Field(max_length=100)]] = None
+    department_id: Optional[Annotated[int, Field(ge=1)]] = None
+    license_number: Optional[Annotated[str, Field(max_length=50)]] = None
+    specialty: Optional[ShortText] = None
+    experience: Optional[Annotated[int, Field(ge=0, le=100)]] = None
+    phone: Optional[Annotated[str, Field(max_length=20)]] = None
+    duty_time: Optional[ShortText] = None
+    bio: Optional[ClinicalText] = None
+    description: Optional[ClinicalText] = None
 
 
 class AgentInput(BaseModel):
-    session_id: Optional[str] = None
-    patient_id: Optional[str] = None
-    user_input: str
-    mode: str = "normal"
-    scene: str = "guide"
+    session_id: Optional[Annotated[str, Field(min_length=1, max_length=128)]] = None
+    patient_id: Optional[IdentifierText] = None
+    user_input: Annotated[str, Field(min_length=1, max_length=4000)]
+    mode: Annotated[str, Field(max_length=30)] = "normal"
+    scene: Annotated[str, Field(max_length=30)] = "guide"
     patient_profile: Optional[Dict[str, Any]] = None
-    therapy: Optional[str] = None        # 疗法（存入 api_clinicrecord.chief_complaint）
-    precautions: Optional[str] = None    # 注意事项（存入 api_clinicrecord.history_of_present_illness）
+    therapy: Optional[ClinicalText] = None        # 疗法（存入 api_clinicrecord.chief_complaint）
+    precautions: Optional[ClinicalText] = None    # 注意事项（存入 api_clinicrecord.history_of_present_illness）
 
 
 class CreateOrderInput(BaseModel):
-    patient_id: str
-    doctor_id: str
-    department: str
-    date: str
-    time: str
-    source: str = "direct"
+    patient_id: IdentifierText
+    doctor_id: IdentifierText
+    department: ShortText
+    date: Annotated[str, Field(pattern=r"^\d{4}-\d{2}-\d{2}$")]
+    time: Annotated[str, Field(pattern=r"^([01]\d|2[0-3]):[0-5]\d$")]
+    source: Annotated[str, Field(max_length=20)] = "direct"
 
 
 class FinishOrderInput(BaseModel):
-    syndrome: str
-    prescription: str
-    ingredients: List[str]
-    advice: str
-    therapy: Optional[str] = None        # 疗法（存入 api_clinicrecord.chief_complaint）
-    precautions: Optional[str] = None    # 注意事项（存入 api_clinicrecord.history_of_present_illness）
+    syndrome: ShortText
+    prescription: ShortText
+    ingredients: Annotated[List[IngredientText], Field(max_length=50)]
+    advice: ClinicalText
+    therapy: Optional[ClinicalText] = None        # 疗法（存入 api_clinicrecord.chief_complaint）
+    precautions: Optional[ClinicalText] = None    # 注意事项（存入 api_clinicrecord.history_of_present_illness）
 
 
 class SaveOrderInput(BaseModel):
-    syndrome: Optional[str] = None
-    prescription: Optional[str] = None
-    ingredients: Optional[List[str]] = None
-    advice: Optional[str] = None
-    therapy: Optional[str] = None        # 疗法
-    precautions: Optional[str] = None    # 注意事项
+    syndrome: Optional[ShortText] = None
+    prescription: Optional[ShortText] = None
+    ingredients: Optional[Annotated[List[IngredientText], Field(max_length=50)]] = None
+    advice: Optional[ClinicalText] = None
+    therapy: Optional[ClinicalText] = None        # 疗法
+    precautions: Optional[ClinicalText] = None    # 注意事项
 
 
 class DiagnosisInput(BaseModel):
-    chief_complaint: str
-    present_illness: str
-    tongue: str
-    pulse: str
-    symptoms: List[str]
-    signs: str
-    other: str
+    chief_complaint: ClinicalText
+    present_illness: ClinicalText
+    tongue: Annotated[str, Field(max_length=200)]
+    pulse: Annotated[str, Field(max_length=200)]
+    symptoms: Annotated[List[IngredientText], Field(min_length=1, max_length=20)]
+    signs: Annotated[str, Field(max_length=200)]
+    other: ClinicalText
 
 
 class EntityWithNameId(BaseModel):
     """实体节点，支持 name 和可选的 id"""
-    name: str
-    id: Optional[str] = None
+    name: ShortText
+    id: Optional[IdentifierText] = None
 
 
 def _convert_entity_list(entities):
@@ -367,26 +424,66 @@ def _convert_entity_list(entities):
 
 
 class AddCaseInput(BaseModel):
-    title: str
-    summary: Optional[str] = None
-    rawText: Optional[str] = None
-    sourceUrl: Optional[str] = None
-    publishDate: Optional[str] = None
-    author: Optional[str] = None
-    channel: Optional[str] = None
-    diseases: Optional[Union[str, List[str], List[EntityWithNameId]]] = None
-    syndromes: Optional[Union[str, List[str], List[EntityWithNameId]]] = None
-    symptoms: Optional[Union[str, List[str], List[EntityWithNameId]]] = None
-    formulas: Optional[Union[str, List[str], List[EntityWithNameId]]] = None
-    treatmentMethods: Optional[Union[str, List[str], List[EntityWithNameId]]] = None
-    doctors: Optional[Union[str, List[str], List[EntityWithNameId]]] = None
+    title: Annotated[str, Field(min_length=1, max_length=200)]
+    summary: Optional[ClinicalText] = None
+    rawText: Optional[Annotated[str, Field(max_length=20000)]] = None
+    sourceUrl: Optional[Annotated[str, Field(max_length=500)]] = None
+    publishDate: Optional[Annotated[str, Field(max_length=30)]] = None
+    author: Optional[ShortText] = None
+    channel: Optional[ShortText] = None
+    diseases: Optional[Union[ShortText, Annotated[List[ShortText], Field(max_length=50)], Annotated[List[EntityWithNameId], Field(max_length=50)]]] = None
+    syndromes: Optional[Union[ShortText, Annotated[List[ShortText], Field(max_length=50)], Annotated[List[EntityWithNameId], Field(max_length=50)]]] = None
+    symptoms: Optional[Union[ShortText, Annotated[List[ShortText], Field(max_length=50)], Annotated[List[EntityWithNameId], Field(max_length=50)]]] = None
+    formulas: Optional[Union[ShortText, Annotated[List[ShortText], Field(max_length=50)], Annotated[List[EntityWithNameId], Field(max_length=50)]]] = None
+    treatmentMethods: Optional[Union[ShortText, Annotated[List[ShortText], Field(max_length=50)], Annotated[List[EntityWithNameId], Field(max_length=50)]]] = None
+    doctors: Optional[Union[ShortText, Annotated[List[ShortText], Field(max_length=50)], Annotated[List[EntityWithNameId], Field(max_length=50)]]] = None
 
 
 app = FastAPI(title="中医药诊疗智能体 API", version="1.0.0")
 
+
+@app.middleware("http")
+async def close_request_db_sessions(request: Request, call_next):
+    """兼容旧接口的手工 Session 获取方式，确保请求结束后归还连接。"""
+    token = request_db_sessions.set([])
+    try:
+        return await call_next(request)
+    finally:
+        for db in request_db_sessions.get() or []:
+            db.close()
+        request_db_sessions.reset(token)
+
+
+@app.on_event("startup")
+async def startup_event():
+    validate_runtime_config()
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    remote_agent_client.close()
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(_: Request, exc: HTTPException):
+    return rate_limit_error_response(exc)
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(_: Request, __: RequestValidationError):
+    return JSONResponse(status_code=422, content={"code": 422, "msg": "请求参数无效"})
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    request_id = request.headers.get("x-request-id", "-")
+    logger.exception("unhandled_request_error request_id=%s path=%s", request_id, request.url.path)
+    return JSONResponse(status_code=500, content={"code": 500, "msg": "服务暂时不可用，请稍后再试"})
+
+cors_origins = [item.strip() for item in os.getenv("CORS_ORIGINS", "http://localhost:5173,http://localhost:8080").split(",") if item.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -404,11 +501,9 @@ def get_memory_usage():
 
 
 @app.get("/api/patients/bypatientid/{patient_id}/basic")
-async def get_patient_basic_by_patient_id(patient_id: str, authorization: str = Header(None)):
+async def get_patient_basic_by_patient_id(patient_id: str, token_info: Dict[str, Any] = Depends(require_auth)):
     """通过patient_id（业务ID）查询患者基本信息（gender、age、allergy_history）"""
-    token_info = parse_token(authorization)
-    if not token_info:
-        return {"code": 401, "msg": "Unauthorized"}
+    require_role(token_info, "doctor")
 
     db = next(get_db())
     patient = db.query(ApiPatient).filter(ApiPatient.patient_id == patient_id).first()
@@ -442,11 +537,30 @@ async def health_check():
         return {"code": 0, "data": {"status": "healthy", "database": "connected"}}
     except Exception as e:
         logger.error(f"Database connection error: {str(e)}")
-        return {"code": 500, "msg": f"Database connection failed: {str(e)}"}
+        return {"code": 500, "msg": "数据库连接失败"}
+
+
+@app.get("/health/live")
+async def liveness_check():
+    return {"code": 0, "data": {"status": "live"}}
+
+
+@app.get("/health/ready")
+async def readiness_check():
+    try:
+        get_redis().ping()
+        db = next(get_db())
+        db.execute(text("SELECT 1"))
+        if not remote_agent_client.is_available():
+            raise RuntimeError("agent unavailable")
+        return {"code": 0, "data": {"status": "ready"}}
+    except Exception:
+        logger.exception("readiness check failed")
+        raise HTTPException(status_code=503, detail="依赖服务暂不可用")
 
 
 @app.post("/api/auth/register")
-async def register(input_data: RegisterInput):
+async def register(input_data: RegisterInput, _: None = Depends(limit_anonymous_write)):
     db = next(get_db())
     
     if input_data.password != input_data.confirm_password:
@@ -474,11 +588,11 @@ async def register(input_data: RegisterInput):
     except SQLAlchemyError as e:
         db.rollback()
         logger.error(f"Register error: {str(e)}")
-        return {"code": 500, "msg": str(e)}
+        return {"code": 500, "msg": "注册失败，请稍后重试"}
 
 
 @app.post("/api/auth/login")
-async def login(input_data: LoginInput):
+async def login(input_data: LoginInput, _: None = Depends(limit_login)):
     db = next(get_db())
     
     patient = db.query(ApiPatient).filter(ApiPatient.username == input_data.username).first()
@@ -496,8 +610,14 @@ async def login(input_data: LoginInput):
     }
 
 
+@app.post("/api/auth/logout")
+async def logout(authorization: str = Header(None), _: Dict[str, Any] = Depends(limit_authenticated_write)):
+    revoke_token(authorization)
+    return {"code": 0, "data": None}
+
+
 @app.post("/api/doctor/auth/login")
-async def doctor_login(input_data: LoginInput):
+async def doctor_login(input_data: LoginInput, _: None = Depends(limit_login)):
     db = next(get_db())
     
     doctor = db.query(ApiDoctor).filter(ApiDoctor.username == input_data.username).first()
@@ -524,10 +644,8 @@ async def doctor_login(input_data: LoginInput):
 
 
 @app.get("/api/patient/profile")
-async def get_patient_profile_api(authorization: str = Header(None)):
-    token_info = parse_token(authorization)
-    if not token_info or token_info.get('role') != 'patient':
-        return {"code": 401, "msg": "Unauthorized"}
+async def get_patient_profile_api(token_info: Dict[str, Any] = Depends(require_auth)):
+    require_role(token_info, "patient")
     
     db = next(get_db())
     patient = db.query(ApiPatient).filter(ApiPatient.patient_id == token_info['role_id']).first()
@@ -549,10 +667,8 @@ async def get_patient_profile_api(authorization: str = Header(None)):
 
 
 @app.put("/api/patient/profile")
-async def update_patient_profile(input_data: PatientProfileInput, authorization: str = Header(None)):
-    token_info = parse_token(authorization)
-    if not token_info or token_info.get('role') != 'patient':
-        return {"code": 401, "msg": "Unauthorized"}
+async def update_patient_profile(input_data: PatientProfileInput, token_info: Dict[str, Any] = Depends(limit_authenticated_write)):
+    require_role(token_info, "patient")
     
     db = next(get_db())
     patient = db.query(ApiPatient).filter(ApiPatient.patient_id == token_info['role_id']).first()
@@ -571,7 +687,7 @@ async def update_patient_profile(input_data: PatientProfileInput, authorization:
     except SQLAlchemyError as e:
         db.rollback()
         logger.error(f"Update patient profile error: {str(e)}")
-        return {"code": 500, "msg": str(e)}
+        return {"code": 500, "msg": "资料更新失败，请稍后重试"}
 
 
 @app.get("/api/departments")
@@ -645,39 +761,46 @@ async def get_doctor_slots(doctor_id: str, date: str = None):
 
 
 @app.post("/api/orders")
-async def create_order(input_data: CreateOrderInput, authorization: str = Header(None)):
-    token_info = parse_token(authorization)
-    logger.info(f"create_order: authorization={authorization}, token_info={token_info}, patient_id={input_data.patient_id}")
-    if not token_info:
-        logger.error(f"create_order: token not found or invalid, authorization={authorization}")
-        return {"code": 401, "msg": "Unauthorized"}
-    if token_info.get('role') != 'patient':
-        logger.error(f"create_order: role is not patient, role={token_info.get('role')}")
-        return {"code": 401, "msg": "Unauthorized"}
+async def create_order(input_data: CreateOrderInput, token_info: Dict[str, Any] = Depends(limit_authenticated_write)):
+    require_role(token_info, "patient")
     
     db = next(get_db())
-    patient = db.query(ApiPatient).filter(ApiPatient.patient_id == input_data.patient_id).first()
-    if not patient:
-        return {"code": 404, "msg": "Patient not found"}
+    patient = current_patient(db, token_info)
     
     doctor = db.query(ApiDoctor).filter(ApiDoctor.doctor_id == input_data.doctor_id).first()
     if not doctor:
         return {"code": 404, "msg": "Doctor not found"}
     
     try:
+        visit_date = datetime.strptime(input_data.date, '%Y-%m-%d').date()
+        start_hour = int(input_data.time.split(':', 1)[0])
+        schedule = db.query(ApiSchedule).filter(
+            ApiSchedule.doctor_id == doctor.id,
+            ApiSchedule.date == visit_date,
+            ApiSchedule.status == 'available',
+            ApiSchedule.available_slots > 0,
+        ).with_for_update().all()
+        schedule = next((item for item in schedule if int(str(item.start_time).split(':', 1)[0]) <= start_hour < int(str(item.end_time).split(':', 1)[0])), None)
+        if not schedule:
+            db.rollback()
+            return JSONResponse(status_code=409, content={"code": 409, "msg": "该时段不可预约或余号不足"})
+
         order_id = f'O{datetime.now().strftime("%Y%m%d%H%M%S")}{uuid.uuid4().hex[:8]}'
         
         order = ApiOrder(
             order_id=order_id,
             patient_id=patient.id,
             doctor_id=doctor.id,
+            department_id=schedule.department_id,
+            schedule_id=schedule.id,
             department=input_data.department,
-            date=datetime.strptime(input_data.date, '%Y-%m-%d').date(),
+            date=visit_date,
             time=input_data.time,
             source=input_data.source,
             status='pending'
         )
         db.add(order)
+        schedule.available_slots -= 1
         db.commit()
         
         return {
@@ -690,10 +813,10 @@ async def create_order(input_data: CreateOrderInput, authorization: str = Header
                 "time": input_data.time
             }
         }
-    except SQLAlchemyError as e:
+    except (SQLAlchemyError, ValueError) as e:
         db.rollback()
         logger.error(f"Create order error: {str(e)}")
-        return {"code": 500, "msg": str(e)}
+        return {"code": 500, "msg": "创建订单失败，请稍后重试"}
 
 
 @app.get("/api/doctor/queue")
@@ -711,7 +834,17 @@ async def get_doctor_queue(authorization: str = Header(None), date: str = None, 
         date = datetime.now().date().isoformat()
     
     target_date = datetime.strptime(date, '%Y-%m-%d').date()
-    orders = db.query(ApiOrder).filter(ApiOrder.doctor_id == doctor.id).all()
+    orders_query = db.query(ApiOrder).filter(ApiOrder.doctor_id == doctor.id, ApiOrder.date == target_date)
+    if department:
+        orders_query = orders_query.filter(ApiOrder.department == department)
+    if period in {"morning", "afternoon"}:
+        schedules = db.query(ApiSchedule.id).filter(
+            ApiSchedule.doctor_id == doctor.id,
+            ApiSchedule.date == target_date,
+            ApiSchedule.morning_afternoon == period,
+        )
+        orders_query = orders_query.filter(ApiOrder.schedule_id.in_(schedules))
+    orders = orders_query.order_by(ApiOrder.time.asc()).all()
     
     result = []
     for order in orders:
@@ -749,16 +882,9 @@ async def get_doctor_queue(authorization: str = Header(None), date: str = None, 
 
 
 @app.put("/api/orders/{order_id}/start")
-async def start_order(order_id: str, authorization: str = Header(None)):
-    token_info = parse_token(authorization)
-    if not token_info:
-        return {"code": 401, "msg": "Unauthorized"}
-    
+async def start_order(order_id: str, token_info: Dict[str, Any] = Depends(limit_authenticated_write)):
     db = next(get_db())
-    
-    order = db.query(ApiOrder).filter(ApiOrder.order_id == order_id).first()
-    if not order:
-        return {"code": 404, "msg": "Order not found"}
+    order = require_order_access(db, order_id, token_info, write=True)
     
     if order.status != 'pending':
         return {"code": 400, "msg": "Order is not pending"}
@@ -770,20 +896,13 @@ async def start_order(order_id: str, authorization: str = Header(None)):
     except SQLAlchemyError as e:
         db.rollback()
         logger.error(f"Start order error: {str(e)}")
-        return {"code": 500, "msg": str(e)}
+        return {"code": 500, "msg": "更新订单失败，请稍后重试"}
 
 
 @app.put("/api/orders/{order_id}/finish")
-async def finish_order(order_id: str, input_data: FinishOrderInput, authorization: str = Header(None)):
-    token_info = parse_token(authorization)
-    if not token_info:
-        return {"code": 401, "msg": "Unauthorized"}
-    
+async def finish_order(order_id: str, input_data: FinishOrderInput, token_info: Dict[str, Any] = Depends(limit_authenticated_write)):
     db = next(get_db())
-    
-    order = db.query(ApiOrder).filter(ApiOrder.order_id == order_id).first()
-    if not order:
-        return {"code": 404, "msg": "Order not found"}
+    order = require_order_access(db, order_id, token_info, write=True)
     
     if order.status not in ['pending', 'ongoing']:
         return {"code": 400, "msg": "Order cannot be finished"}
@@ -794,8 +913,6 @@ async def finish_order(order_id: str, input_data: FinishOrderInput, authorizatio
         order.prescription = input_data.prescription
         order.ingredients = input_data.ingredients
         order.advice = input_data.advice
-        db.commit()
-        
         record_id = f'R{datetime.now().strftime("%Y%m%d%H%M%S")}{uuid.uuid4().hex[:8]}'
         record = ApiClinicRecord(
             record_id=record_id,
@@ -818,20 +935,13 @@ async def finish_order(order_id: str, input_data: FinishOrderInput, authorizatio
     except SQLAlchemyError as e:
         db.rollback()
         logger.error(f"Finish order error: {str(e)}")
-        return {"code": 500, "msg": str(e)}
+        return {"code": 500, "msg": "完成订单失败，请稍后重试"}
 
 
 @app.put("/api/orders/{order_id}/save")
-async def save_order(order_id: str, input_data: SaveOrderInput, authorization: str = Header(None)):
-    token_info = parse_token(authorization)
-    if not token_info:
-        return {"code": 401, "msg": "Unauthorized"}
-    
+async def save_order(order_id: str, input_data: SaveOrderInput, token_info: Dict[str, Any] = Depends(limit_authenticated_write)):
     db = next(get_db())
-    
-    order = db.query(ApiOrder).filter(ApiOrder.order_id == order_id).first()
-    if not order:
-        return {"code": 404, "msg": "Order not found"}
+    order = require_order_access(db, order_id, token_info, write=True)
     
     if order.status not in ['pending', 'ongoing']:
         return {"code": 400, "msg": "Order cannot be saved"}
@@ -849,20 +959,13 @@ async def save_order(order_id: str, input_data: SaveOrderInput, authorization: s
     except SQLAlchemyError as e:
         db.rollback()
         logger.error(f"Save order error: {str(e)}")
-        return {"code": 500, "msg": str(e)}
+        return {"code": 500, "msg": "保存订单失败，请稍后重试"}
 
 
 @app.post("/api/orders/{order_id}/diagnosis")
-async def submit_diagnosis(order_id: str, input_data: DiagnosisInput, authorization: str = Header(None)):
-    token_info = parse_token(authorization)
-    if not token_info:
-        return {"code": 401, "msg": "Unauthorized"}
-    
+async def submit_diagnosis(order_id: str, input_data: DiagnosisInput, token_info: Dict[str, Any] = Depends(limit_authenticated_write)):
     db = next(get_db())
-    
-    order = db.query(ApiOrder).filter(ApiOrder.order_id == order_id).first()
-    if not order:
-        return {"code": 404, "msg": "Order not found"}
+    order = require_order_access(db, order_id, token_info, write=True)
     
     try:
         order.chief_complaint = input_data.chief_complaint
@@ -878,31 +981,23 @@ async def submit_diagnosis(order_id: str, input_data: DiagnosisInput, authorizat
     except SQLAlchemyError as e:
         db.rollback()
         logger.error(f"Submit diagnosis error: {str(e)}")
-        return {"code": 500, "msg": str(e)}
+        return {"code": 500, "msg": "提交诊断失败，请稍后重试"}
 
 
 
 @app.get("/api/orders/{order_id}/patient")
-async def get_order_patient(order_id: str, authorization: str = Header(None)):
+async def get_order_patient(order_id: str, token_info: Dict[str, Any] = Depends(require_auth)):
     """通过order_id查询订单关联的patient_id"""
-    token_info = parse_token(authorization)
-    if not token_info:
-        return {"code": 401, "msg": "Unauthorized"}
-
     db = next(get_db())
-    order = db.query(ApiOrder).filter(ApiOrder.order_id == order_id).first()
-    if not order:
-        return {"code": 404, "msg": "Order not found"}
+    order = require_order_access(db, order_id, token_info)
 
     return {"code": 0, "data": {"order_id": order_id, "patient_id": order.patient_id}}
 
 
 @app.get("/api/patients/{patient_id}/basic")
-async def get_patient_basic(patient_id: int, authorization: str = Header(None)):
+async def get_patient_basic(patient_id: int, token_info: Dict[str, Any] = Depends(require_auth)):
     """通过患者id查询基本信息（gender、age、allergy_history）"""
-    token_info = parse_token(authorization)
-    if not token_info:
-        return {"code": 401, "msg": "Unauthorized"}
+    require_role(token_info, "doctor")
 
     db = next(get_db())
     patient = db.query(ApiPatient).filter(ApiPatient.id == patient_id).first()
@@ -922,24 +1017,27 @@ async def get_patient_basic(patient_id: int, authorization: str = Header(None)):
 
 @app.get("/api/records")
 async def search_records(name: str = "", patient_id: str = "", syndrome: str = "", 
-                         date_from: str = "", date_to: str = "", page: int = 1, page_size: int = 20):
+                         date_from: str = "", date_to: str = "", page: int = 1, page_size: int = 20,
+                         token_info: Dict[str, Any] = Depends(require_auth)):
+    require_role(token_info, "doctor")
+    if page < 1 or not 1 <= page_size <= 100:
+        raise HTTPException(status_code=422, detail="分页参数无效")
     db = next(get_db())
-    
-    records = db.query(ApiClinicRecord).all()
-    
+    query = db.query(ApiClinicRecord, ApiPatient).join(ApiPatient, ApiPatient.id == ApiClinicRecord.patient_id)
+    if name:
+        query = query.filter(ApiPatient.name.contains(name[:100]))
+    if patient_id:
+        query = query.filter(ApiPatient.patient_id == patient_id[:50])
+    if syndrome:
+        query = query.filter(ApiClinicRecord.zheng_type.contains(syndrome[:100]))
+    if date_from:
+        query = query.filter(ApiClinicRecord.visit_date >= datetime.strptime(date_from, "%Y-%m-%d"))
+    if date_to:
+        query = query.filter(ApiClinicRecord.visit_date < datetime.strptime(date_to, "%Y-%m-%d") + timedelta(days=1))
+    total = query.count()
+    rows = query.order_by(ApiClinicRecord.visit_date.desc()).offset((page - 1) * page_size).limit(page_size).all()
     filtered = []
-    for record in records:
-        patient = db.query(ApiPatient).filter(ApiPatient.id == record.patient_id).first()
-        
-        if name and patient and name not in patient.name:
-            continue
-        if patient_id:
-            p = db.query(ApiPatient).filter(ApiPatient.patient_id == patient_id).first()
-            if p and record.patient_id != p.id:
-                continue
-        if syndrome and syndrome not in (record.zheng_type or ""):
-            continue
-        
+    for record, patient in rows:
         filtered.append({
             'record_id': record.record_id,
             'patient': {
@@ -953,14 +1051,10 @@ async def search_records(name: str = "", patient_id: str = "", syndrome: str = "
             'date': record.visit_date.isoformat() if record.visit_date else ""
         })
     
-    total = len(filtered)
-    start = (page - 1) * page_size
-    end = start + page_size
-    
     return {
         "code": 0,
         "data": {
-            "list": filtered[start:end],
+            "list": filtered,
             "total": total,
             "page": page,
             "page_size": page_size
@@ -969,7 +1063,8 @@ async def search_records(name: str = "", patient_id: str = "", syndrome: str = "
 
 
 @app.get("/api/records/{record_id}")
-async def get_record_detail(record_id: str):
+async def get_record_detail(record_id: str, token_info: Dict[str, Any] = Depends(require_auth)):
+    require_role(token_info, "doctor")
     db = next(get_db())
     
     record = db.query(ApiClinicRecord).filter(ApiClinicRecord.record_id == record_id).first()
@@ -1007,7 +1102,8 @@ async def get_record_detail(record_id: str):
 
 
 @app.get("/api/patient/{patient_id}/history")
-async def get_patient_history(patient_id: str):
+async def get_patient_history(patient_id: str, token_info: Dict[str, Any] = Depends(require_auth)):
+    require_role(token_info, "doctor")
     db = next(get_db())
     
     patient = db.query(ApiPatient).filter(ApiPatient.patient_id == patient_id).first()
@@ -1073,12 +1169,9 @@ async def get_diagnosis_history(authorization: str = Header(None), status: str =
 
 
 @app.get("/api/orders/{order_id}")
-async def get_order_detail(order_id: str):
+async def get_order_detail(order_id: str, token_info: Dict[str, Any] = Depends(require_auth)):
     db = next(get_db())
-    
-    order = db.query(ApiOrder).filter(ApiOrder.order_id == order_id).first()
-    if not order:
-        return {"code": 404, "msg": "Order not found"}
+    order = require_order_access(db, order_id, token_info)
     
     patient = db.query(ApiPatient).filter(ApiPatient.id == order.patient_id).first()
     doctor = db.query(ApiDoctor).filter(ApiDoctor.id == order.doctor_id).first()
@@ -1166,7 +1259,6 @@ async def get_doctor_profile(authorization: str = Header(None)):
         "data": {
             "doctor_id": doctor.doctor_id,
             "name": doctor.name,
-            "password": doctor.password,
             "role": "doctor",
             "username": doctor.username,
             "phone": doctor.phone or "",
@@ -1179,10 +1271,8 @@ async def get_doctor_profile(authorization: str = Header(None)):
 
 
 @app.put("/api/doctor/profile")
-async def update_doctor_profile(input_data: DoctorProfileInput, authorization: str = Header(None)):
-    token_info = parse_token(authorization)
-    if not token_info or token_info.get('role') != 'doctor':
-        return {"code": 401, "msg": "Unauthorized"}
+async def update_doctor_profile(input_data: DoctorProfileInput, token_info: Dict[str, Any] = Depends(limit_authenticated_write)):
+    require_role(token_info, "doctor")
     
     db = next(get_db())
     doctor = db.query(ApiDoctor).filter(ApiDoctor.doctor_id == token_info['role_id']).first()
@@ -1198,80 +1288,33 @@ async def update_doctor_profile(input_data: DoctorProfileInput, authorization: s
     except SQLAlchemyError as e:
         db.rollback()
         logger.error(f"Update doctor profile error: {str(e)}")
-        return {"code": 500, "msg": str(e)}
+        return {"code": 500, "msg": "资料更新失败，请稍后重试"}
 
 
 @app.get("/api/admin/users")
-async def get_users(authorization: str = Header(None)):
-    token_info = parse_token(authorization)
-    if not token_info or token_info.get('role') != 'doctor':
-        return {"code": 401, "msg": "Unauthorized"}
-    
-    db = next(get_db())
-    doctor = db.query(ApiDoctor).filter(ApiDoctor.doctor_id == token_info['role_id']).first()
-    if not doctor:
-        return {"code": 401, "msg": "Unauthorized"}
-    
-    result = []
-    
-    patients = db.query(ApiPatient).all()
-    for p in patients:
-        result.append({
-            'id': p.id,
-            'username': p.username,
-            'role': 'patient',
-            'patient_id': p.patient_id,
-            'name': p.name
-        })
-    
-    doctors = db.query(ApiDoctor).all()
-    for d in doctors:
-        dept_name = ""
-        if d.department_id:
-            dept = db.query(ApiDepartment).filter(ApiDepartment.id == d.department_id).first()
-            if dept:
-                dept_name = dept.name
-        result.append({
-            'id': d.id,
-            'username': d.username,
-            'role': 'doctor',
-            'doctor_id': d.doctor_id,
-            'name': d.name,
-            'department': dept_name
-        })
-    
-    return {"code": 0, "data": result}
+async def get_users(_: Dict[str, Any] = Depends(require_auth)):
+    """管理后台尚未实现独立管理员角色，默认关闭，避免普通医生越权。"""
+    raise HTTPException(status_code=403, detail="管理功能暂未开放")
 
 
 
 @app.post("/api/agent/chat")
-def agent_chat(input_data: AgentInput, authorization: str = Header(None)):
+async def agent_chat(input_data: AgentInput, token_info: Dict[str, Any] = Depends(limit_agent_request)):
     try:
+        if not input_data.user_input or len(input_data.user_input) > 4000:
+            raise HTTPException(status_code=422, detail="问诊文本长度必须为 1-4000 个字符")
         db = next(get_db())
-        token_info = parse_token(authorization)
-        
-        patient_id = input_data.patient_id
-        if not patient_id and token_info and token_info.get('role') == 'patient':
-            patient = db.query(ApiPatient).filter(ApiPatient.patient_id == token_info['role_id']).first()
-            if patient:
-                patient_id = patient.patient_id
-        
-        if not patient_id:
-            patient_id = 'P001'
-        
-        if not input_data.patient_profile:
-            input_data.patient_profile = get_patient_profile(db, patient_id)
-        
+        patient_id = input_data.patient_id or token_info.get("role_id")
+        patient = require_agent_patient_access(db, patient_id, token_info)
+        patient_profile = get_patient_profile(db, patient.patient_id)
         sid = input_data.session_id or f"S_{patient_id}_{int(time.time())}"
-        
-        logger.info(f"Using tcm_agent for chat, session: {sid}")
-        raw = tcm_agent_chat(
+        raw = await remote_agent_client.chat_async(
             session_id=sid,
             patient_id=patient_id,
             user_input=input_data.user_input,
             mode=input_data.mode,
             scene=input_data.scene,
-            patient_profile=input_data.patient_profile
+            patient_profile=patient_profile,
         )
         
         response_data = {
@@ -1287,49 +1330,37 @@ def agent_chat(input_data: AgentInput, authorization: str = Header(None)):
             response_data["ask_round"] = raw.get("ask_round", 1)
         
         return {"code": 0, "data": response_data}
-    except Exception as e:
-        logger.error(f"agent_chat error: {str(e)}")
-        return {"code": 500, "msg": str(e)}
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("agent_chat failed")
+        raise HTTPException(status_code=502, detail="智能助手暂不可用")
 
 
 @app.post("/api/agent/chat/stream")
-def agent_chat_stream(input_data: AgentInput, authorization: str = Header(None)):
+async def agent_chat_stream(input_data: AgentInput, token_info: Dict[str, Any] = Depends(limit_agent_request)):
     try:
+        if not input_data.user_input or len(input_data.user_input) > 4000:
+            raise HTTPException(status_code=422, detail="问诊文本长度必须为 1-4000 个字符")
         db = next(get_db())
-        token_info = parse_token(authorization)
-        
-        patient_id = input_data.patient_id
-        if not patient_id and token_info and token_info.get('role') == 'patient':
-            patient = db.query(ApiPatient).filter(ApiPatient.patient_id == token_info['role_id']).first()
-            if patient:
-                patient_id = patient.patient_id
-        
-        if not patient_id:
-            patient_id = 'P001'
-        
-        if not input_data.patient_profile:
-            input_data.patient_profile = get_patient_profile(db, patient_id)
-        
+        patient_id = input_data.patient_id or token_info.get("role_id")
+        patient = require_agent_patient_access(db, patient_id, token_info)
+        patient_profile = get_patient_profile(db, patient.patient_id)
         sid = input_data.session_id or f"S_{patient_id}_{int(time.time())}"
-        
-        logger.info(f"Using tcm_agent for streaming chat, session: {sid}")
-        
-        def generate():
+        async def generate():
             try:
-                from traditional_medical_agent.tcm_agent import tcm_agent_stream_chat
-                
-                for chunk in tcm_agent_stream_chat(
+                async for chunk in remote_agent_client.stream_chat(
                     session_id=sid,
                     patient_id=patient_id,
                     user_input=input_data.user_input,
                     mode=input_data.mode,
                     scene=input_data.scene,
-                    patient_profile=input_data.patient_profile
+                    patient_profile=patient_profile,
                 ):
                     yield chunk
-            except Exception as e:
-                logger.error(f"agent_chat_stream error: {str(e)}")
-                yield f"data: {json.dumps({'code': 500, 'data': {'status': 'error', 'response': f'处理失败：{str(e)}', 'finish': False}}, ensure_ascii=False)}\n\n"
+            except Exception:
+                logger.exception("agent_chat_stream failed")
+                yield f"data: {json.dumps({'code': 502, 'data': {'status': 'error', 'response': '智能助手暂不可用', 'finish': False}}, ensure_ascii=False)}\n\n"
                 yield "data: [DONE]\n\n"
         
         return StreamingResponse(
@@ -1342,46 +1373,17 @@ def agent_chat_stream(input_data: AgentInput, authorization: str = Header(None))
                 "X-Accel-Buffering": "no",
             }
         )
-    except Exception as e:
-        logger.error(f"agent_chat_stream init error: {str(e)}")
-        return {"code": 500, "msg": str(e)}
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("agent_chat_stream initialization failed")
+        raise HTTPException(status_code=502, detail="智能助手暂不可用")
 
 
 @app.post("/api/knowledge/case")
-async def add_case_api(input_data: AddCaseInput):
-    try:
-        from traditional_medical_agent.kg_service import add_case
-
-        result = add_case(
-            title=input_data.title,
-            summary=input_data.summary,
-            raw_text=input_data.rawText,
-            source_url=input_data.sourceUrl,
-            publish_date=input_data.publishDate,
-            author=input_data.author,
-            channel=input_data.channel,
-            diseases=_convert_entity_list(input_data.diseases),
-            syndromes=_convert_entity_list(input_data.syndromes),
-            symptoms=_convert_entity_list(input_data.symptoms),
-            formulas=_convert_entity_list(input_data.formulas),
-            treatment_methods=_convert_entity_list(input_data.treatmentMethods),
-            doctors=_convert_entity_list(input_data.doctors)
-        )
-
-        if result.get("success"):
-            return {
-                "code": 0,
-                "data": {
-                    "caseId": result.get("caseId"),
-                    "sourceId": result.get("sourceId"),
-                    "linked": result.get("linked", {})
-                }
-            }
-        else:
-            return {"code": 400, "msg": result.get("message", "写入失败")}
-    except Exception as e:
-        logger.error(f"add_case_api error: {str(e)}")
-        return {"code": 500, "msg": str(e)}
+async def add_case_api(_: AddCaseInput, __: Dict[str, Any] = Depends(limit_authenticated_write)):
+    """图谱写入尚未具备独立管理员审核流，首期默认关闭。"""
+    raise HTTPException(status_code=403, detail="医案写入功能暂未开放")
 
 
 @app.get("/api/knowledge/case/doctor")
@@ -1408,7 +1410,7 @@ def get_doctor_cases(
             return {"code": 400, "msg": result.get("message", "查询失败")}
     except Exception as e:
         logger.error(f"get_doctor_cases error: {str(e)}")
-        return {"code": 500, "msg": str(e)}
+        return {"code": 500, "msg": "医案查询失败，请稍后重试"}
 
 
 if __name__ == "__main__":

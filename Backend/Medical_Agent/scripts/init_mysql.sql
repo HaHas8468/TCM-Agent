@@ -1,3 +1,6 @@
+-- Docker MySQL 镜像的初始化客户端默认可能为 latin1；种子数据文件为 UTF-8。
+SET NAMES utf8mb4;
+
 CREATE TABLE api_department (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     department_id VARCHAR(50) NOT NULL UNIQUE,
@@ -10,7 +13,30 @@ CREATE TABLE api_department (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 
-。
+CREATE TABLE api_patient (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    patient_id VARCHAR(50) NULL UNIQUE,
+    username VARCHAR(150) NOT NULL UNIQUE,
+    password VARCHAR(128) NOT NULL,
+    name VARCHAR(100) NOT NULL,
+    gender VARCHAR(10) NOT NULL,
+    birth_date DATE NULL,
+    age INT NOT NULL,
+    phone VARCHAR(20) NULL,
+    address VARCHAR(200) NULL,
+    id_card VARCHAR(20) NULL UNIQUE,
+    blood_type VARCHAR(10) NULL,
+    health_info TEXT NULL,
+    allergy_history JSON NULL,
+    emergency_contact VARCHAR(100) NULL,
+    emergency_phone VARCHAR(20) NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_patient_username (username),
+    INDEX idx_patient_name (name)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+
 
 
 CREATE TABLE api_doctor (
@@ -248,10 +274,10 @@ INSERT INTO api_doctor (doctor_id, username, password, name, title, hospital, de
 
 
 INSERT INTO api_schedule (schedule_id, doctor_id, department_id, date, start_time, end_time, morning_afternoon, total_slots, available_slots) VALUES
-('SCH20260710001', 1, 2, '2026-07-10', '08:00:00', '12:00:00', '上午', 30, 25),
-('SCH20260710002', 1, 2, '2026-07-10', '14:00:00', '18:00:00', '下午', 30, 30),
-('SCH20260710003', 2, 2, '2026-07-10', '08:00:00', '12:00:00', '上午', 30, 28),
-('SCH20260711001', 1, 2, '2026-07-11', '08:00:00', '12:00:00', '上午', 30, 30),
-('SCH20260711002', 3, 6, '2026-07-11', '14:00:00', '18:00:00', '下午', 30, 20);
+('SCH_DEMO_001', 1, 2, CURDATE(), '08:00:00', '12:00:00', '上午', 30, 25),
+('SCH_DEMO_002', 1, 2, CURDATE(), '14:00:00', '18:00:00', '下午', 30, 30),
+('SCH_DEMO_003', 2, 2, CURDATE(), '08:00:00', '12:00:00', '上午', 30, 28),
+('SCH_DEMO_004', 1, 2, DATE_ADD(CURDATE(), INTERVAL 1 DAY), '08:00:00', '12:00:00', '上午', 30, 30),
+('SCH_DEMO_005', 3, 6, DATE_ADD(CURDATE(), INTERVAL 1 DAY), '14:00:00', '18:00:00', '下午', 30, 20);
 
 SELECT 'MySQL tables created successfully!' AS message;

@@ -1,6 +1,7 @@
 import pymysql
+import os
 
-conn = pymysql.connect(host='localhost', user='root', password='TANXIAOYU', db='traditional_medical', port=3306)
+conn = pymysql.connect(host=os.environ['MYSQL_HOST'], user=os.environ['MYSQL_USER'], password=os.environ['MYSQL_PASSWORD'], db=os.environ['MYSQL_DB'], port=int(os.getenv('MYSQL_PORT', '3306')))
 cursor = conn.cursor()
 
 try:
@@ -17,7 +18,7 @@ try:
     
     cursor.execute("SHOW COLUMNS FROM api_doctor LIKE 'password'")
     if not cursor.fetchone():
-        cursor.execute('ALTER TABLE api_doctor ADD COLUMN password VARCHAR(128) NOT NULL DEFAULT \'Prototype123\' AFTER username')
+        raise RuntimeError('拒绝创建带默认明文密码的列；请通过受控迁移显式初始化账号')
         print('Added password to api_doctor')
     
     cursor.execute("SHOW COLUMNS FROM api_doctor LIKE 'user_id'")
@@ -38,7 +39,7 @@ try:
     
     cursor.execute("SHOW COLUMNS FROM api_patient LIKE 'password'")
     if not cursor.fetchone():
-        cursor.execute('ALTER TABLE api_patient ADD COLUMN password VARCHAR(128) NOT NULL DEFAULT \'123456\' AFTER username')
+        raise RuntimeError('拒绝创建带默认明文密码的列；请通过受控迁移显式初始化账号')
         print('Added password to api_patient')
     
     cursor.execute("SHOW COLUMNS FROM api_patient LIKE 'user_id'")
@@ -46,10 +47,6 @@ try:
         cursor.execute('ALTER TABLE api_patient DROP COLUMN user_id')
         print('Dropped user_id from api_patient')
     
-    cursor.execute("UPDATE api_doctor SET username='doctor.lin', password='Prototype123' WHERE doctor_id='D001'")
-    cursor.execute("UPDATE api_doctor SET username='doctor.zhou', password='Prototype123' WHERE doctor_id='D002'")
-    cursor.execute("UPDATE api_doctor SET username='doctor.zhang', password='Prototype123' WHERE doctor_id='D003'")
-    cursor.execute("UPDATE api_doctor SET username='doctor.chen', password='Prototype123' WHERE doctor_id='D004'")
     print('Updated doctor data')
     
     conn.commit()

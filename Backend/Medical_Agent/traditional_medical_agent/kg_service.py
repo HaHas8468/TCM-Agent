@@ -1,15 +1,57 @@
 import os
 import re
 import json
-import subprocess
-import time
+import logging
+import threading
+
+import httpx
 from dotenv import load_dotenv
 
 load_dotenv()
 
-KG_SERVICE_PATH = os.path.join(os.path.dirname(__file__), "neo4j_main", "knowledge_graph_query.js")
+logger = logging.getLogger(__name__)
+
+KG_SERVICE_BASE_URL = os.getenv("KG_SERVICE_BASE_URL", "http://kg:3000").rstrip("/")
+KG_SERVICE_TIMEOUT_SECONDS = max(1.0, float(os.getenv("KG_SERVICE_TIMEOUT_SECONDS", "20")))
+KG_MAX_CONCURRENCY = max(1, int(os.getenv("KG_MAX_CONCURRENCY", "2")))
+_kg_capacity = threading.BoundedSemaphore(KG_MAX_CONCURRENCY)
+_kg_client = None
 
 _llm_herb_cleaner = None
+
+
+def _get_kg_client():
+    global _kg_client
+    if _kg_client is None:
+        _kg_client = httpx.Client(base_url=KG_SERVICE_BASE_URL)
+    return _kg_client
+
+
+def _query_kg_service(path: str, action: str, params: dict, timeout: float) -> dict:
+    """调用常驻图谱服务；错误细节只保留在服务端日志中。"""
+    acquire_timeout = min(timeout, KG_SERVICE_TIMEOUT_SECONDS)
+    if not _kg_capacity.acquire(timeout=acquire_timeout):
+        logger.warning("kg_request_rejected reason=capacity path=%s action=%s", path, action)
+        return {"ok": False, "error": "知识图谱服务繁忙"}
+    try:
+        response = _get_kg_client().post(
+            path,
+            json={"action": action, "params": params},
+            timeout=acquire_timeout,
+        )
+        if response.status_code != 200:
+            logger.warning("kg_request_failed path=%s action=%s status=%s", path, action, response.status_code)
+            return {"ok": False, "error": "知识图谱服务暂不可用"}
+        payload = response.json()
+        if not isinstance(payload, dict) or not payload.get("ok"):
+            logger.warning("kg_request_failed path=%s action=%s reason=invalid_result", path, action)
+            return {"ok": False, "error": "知识图谱服务暂不可用"}
+        return payload
+    except (httpx.HTTPError, ValueError) as exc:
+        logger.warning("kg_request_failed path=%s action=%s error=%s", path, action, type(exc).__name__)
+        return {"ok": False, "error": "知识图谱服务暂不可用"}
+    finally:
+        _kg_capacity.release()
 
 def _get_herb_cleaner():
     global _llm_herb_cleaner
@@ -23,13 +65,13 @@ def _get_herb_cleaner():
 def _clean_herb_name_batch(raw_names):
     if not raw_names:
         return []
-    
+
     valid = [n for n in raw_names if n and isinstance(n, str) and any('\u4e00' <= c <= '\u9fff' for c in n)]
     if not valid:
         return []
-    
+
     unique_names = list(dict.fromkeys(valid))
-    
+
     try:
         cleaner = _get_herb_cleaner()
         names_str = "\n".join([f"{i+1}. {name}" for i, name in enumerate(unique_names)])
@@ -49,20 +91,20 @@ def _clean_herb_name_batch(raw_names):
 {names_str}
 
 请严格按以上规则，只输出规范化后的中药名，每行一个，顺序对应输入："""
-        
+
         from langchain_core.messages import HumanMessage
         response = cleaner.invoke([HumanMessage(content=prompt)])
         result = response.content.strip()
-        
+
         cleaned = [line.strip() for line in result.split("\n") if line.strip()]
         cleaned = [re.sub(r"^\d+[\.、]\s*", "", c) for c in cleaned]
-        
+
         if len(cleaned) != len(unique_names):
             return ["" for _ in unique_names]
-        
+
         return cleaned
-    except Exception as e:
-        print(f"LLM 药材清理失败: {e}")
+    except Exception as exc:
+        logger.warning("herb_name_cleanup_failed error=%s", type(exc).__name__)
         return ["" for _ in unique_names]
 
 def _clean_herb_name(name):
@@ -71,123 +113,49 @@ def _clean_herb_name(name):
 def call_kg_service(input_text):
     if not input_text:
         return {"error": "输入为空"}
-    
-    env = os.environ.copy()
-    env.pop("NEO4J_URI", None)
-    env.pop("NEO4J_USERNAME", None)
-    env.pop("NEO4J_PASSWORD", None)
-    env.pop("NEO4J_DATABASE", None)
-    
-    try:
-        kg_service_dir = os.path.dirname(KG_SERVICE_PATH)
-        result = subprocess.run(
-            ["node", KG_SERVICE_PATH, input_text],
-            capture_output=True,
-            text=True,
-            encoding='utf-8',
-            errors='replace',
-            timeout=20,
-            env=env,
-            cwd=kg_service_dir
-        )
-        
-        if result.returncode != 0:
-            error_msg = result.stderr.strip() if result.stderr else f"Exit code {result.returncode}"
-            print(f"kg_service error: {error_msg}")
-            return {"error": error_msg}
-        
-        output = result.stdout.strip()
-        if not output:
-            return {"error": "知识图谱服务返回空结果"}
-        
-        try:
-            return json.loads(output)
-        except json.JSONDecodeError as e:
-            print(f"kg_service JSON解析失败: {e}, output: {output[:200]}")
-            return {"error": f"JSON解析失败: {str(e)}", "raw_output": output}
-            
-    except subprocess.TimeoutExpired:
-        return {"error": "知识图谱服务调用超时"}
-    except Exception as e:
-        print(f"kg_service异常: {e}")
-        return {"error": str(e)}
+    result = _query_kg_service(
+        "/main/query",
+        "searchFormulasBySymptom",
+        {"description": input_text},
+        KG_SERVICE_TIMEOUT_SECONDS,
+    )
+    return result if result.get("ok") else {"error": result.get("error", "知识图谱服务暂不可用")}
 
 
 def call_kg_action(action: str, params: dict = None, timeout: int = 60):
     """通过 Node.js API 入口调用 neo4j_main 知识图谱服务。
-    
+
     Args:
         action: 接口名（如 searchHerbs、getHerbDetail、getFormulaDetail 等）
         params: 接口参数字典
-    
+
     Returns:
         dict: {ok, query, params, data} 或 {ok: False, error}
     """
     if not action:
         return {"ok": False, "error": "action is required"}
-    
-    params = params or {}
-    params_str = json.dumps(params, ensure_ascii=False)
-    
-    env = os.environ.copy()
-    env.pop("NEO4J_URI", None)
-    env.pop("NEO4J_USERNAME", None)
-    env.pop("NEO4J_PASSWORD", None)
-    env.pop("NEO4J_DATABASE", None)
-    
-    try:
-        kg_service_dir = os.path.dirname(KG_SERVICE_PATH)
-        result = subprocess.run(
-            ["node", "-e",
-             f'const kg = require("./{os.path.basename(KG_SERVICE_PATH)}"); '
-             f'kg.runAgentQuery("{action}", {json.dumps(params, ensure_ascii=False)}).then(r => {{ console.log(JSON.stringify(r)); return kg.close(); }}).catch(e => {{ console.error(e); process.exit(1); }});'],
-            capture_output=True,
-            text=True,
-            encoding='utf-8',
-            errors='replace',
-            timeout=timeout,
-            env=env,
-            cwd=kg_service_dir
-        )
-        
-        if result.returncode != 0:
-            error_msg = result.stderr.strip() if result.stderr else f"Exit code {result.returncode}"
-            return {"ok": False, "error": error_msg}
-        
-        output = result.stdout.strip()
-        if not output:
-            return {"ok": False, "error": "知识图谱服务返回空结果"}
-        
-        try:
-            data = json.loads(output)
-            return data
-        except json.JSONDecodeError as e:
-            return {"ok": False, "error": f"JSON解析失败: {str(e)}", "raw_output": output}
-            
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "error": "知识图谱服务调用超时"}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
+
+    return _query_kg_service("/main/query", action, params or {}, timeout)
 
 
 def search_herbs(keyword: str, limit: int = 5, include_formula_only: bool = False):
     """按中药名/功效/主治/性味/归经等检索中药"""
     if not keyword:
         return {"herbs": [], "success": False, "message": "关键词为空"}
-    
+
     result = call_kg_action("searchHerbs", {
         "keyword": keyword,
         "limit": limit,
         "includeFormulaOnly": include_formula_only,
     })
-    
+
     if not result.get("ok"):
         return {
             "herbs": [],
             "success": False,
             "message": result.get("error", "查询失败"),
         }
-    
+
     return {
         "herbs": result.get("data", []),
         "success": True,
@@ -199,28 +167,28 @@ def get_herb_detail(name: str = None, herb_id: str = None):
     """获取单味中药详情（功效/禁忌/性味/归经/配伍/相关方剂）"""
     if not name and not herb_id:
         return {"herb": None, "success": False, "message": "name 或 id 至少传一个"}
-    
+
     params = {}
     if herb_id:
         params["id"] = herb_id
     else:
         params["name"] = name
-    
+
     result = call_kg_action("getHerbDetail", params)
-    
+
     if not result.get("ok"):
         return {
             "herb": None,
             "success": False,
             "message": result.get("error", "查询失败"),
         }
-    
+
     data = result.get("data", [])
     if isinstance(data, list) and data:
         return {"herb": data[0], "success": True, "message": "查询成功"}
     elif isinstance(data, dict):
         return {"herb": data, "success": True, "message": "查询成功"}
-    
+
     return {"herb": None, "success": False, "message": "未找到该中药"}
 
 
@@ -228,19 +196,19 @@ def search_formula_by_name(formula: str, limit: int = 5):
     """按方剂名检索方剂详情"""
     if not formula:
         return {"formulas": [], "success": False, "message": "方剂名为空"}
-    
+
     result = call_kg_action("searchFormulaByName", {
         "formula": formula,
         "limit": limit,
     })
-    
+
     if not result.get("ok"):
         return {
             "formulas": [],
             "success": False,
             "message": result.get("error", "查询失败"),
         }
-    
+
     return {
         "formulas": result.get("data", []),
         "success": True,
@@ -252,28 +220,28 @@ def get_formula_detail(name: str = None, formula_id: str = None):
     """获取单个方剂详情（组成/功效/禁忌/原文）"""
     if not name and not formula_id:
         return {"formula": None, "success": False, "message": "name 或 id 至少传一个"}
-    
+
     params = {}
     if formula_id:
         params["id"] = formula_id
     else:
         params["name"] = name
-    
+
     result = call_kg_action("getFormulaDetail", params)
-    
+
     if not result.get("ok"):
         return {
             "formula": None,
             "success": False,
             "message": result.get("error", "查询失败"),
         }
-    
+
     data = result.get("data", [])
     if isinstance(data, list) and data:
         return {"formula": data[0], "success": True, "message": "查询成功"}
     elif isinstance(data, dict):
         return {"formula": data, "success": True, "message": "查询成功"}
-    
+
     return {"formula": None, "success": False, "message": "未找到该方剂"}
 
 
@@ -281,7 +249,7 @@ def search_by_doctor(doctor: str = None, doctor_id: str = None, limit: int = 10)
     """按名医名字或ID检索相关医案，与 neo4j_case README.md 中 searchByDoctor/searchByDoctorId 一致"""
     if not doctor and not doctor_id:
         return {"cases": [], "success": False, "message": "doctor 或 doctor_id 至少传一个"}
-    
+
     if doctor_id:
         result = call_case_kg_service("searchByDoctorId", {
             "doctorId": doctor_id,
@@ -292,14 +260,14 @@ def search_by_doctor(doctor: str = None, doctor_id: str = None, limit: int = 10)
             "doctor": doctor,
             "limit": limit,
         })
-    
+
     if not result.get("ok"):
         return {
             "cases": [],
             "success": False,
             "message": result.get("error", "查询失败"),
         }
-    
+
     return {
         "cases": result.get("data", []),
         "success": True,
@@ -312,19 +280,19 @@ def search_formulas_by_effect(effect: str, limit: int = 5):
     """按功效检索方剂"""
     if not effect:
         return {"formulas": [], "success": False, "message": "功效关键词为空"}
-    
+
     result = call_kg_action("searchFormulasByEffect", {
         "effect": effect,
         "limit": limit,
     })
-    
+
     if not result.get("ok"):
         return {
             "formulas": [],
             "success": False,
             "message": result.get("error", "查询失败"),
         }
-    
+
     return {
         "formulas": result.get("data", []),
         "success": True,
@@ -345,7 +313,7 @@ def recommend_clinical_options(description=None, symptoms=None, effect=None, for
         params["formula"] = formula
     if herb:
         params["herb"] = herb
-    
+
     if not any([description, symptoms, effect, formula, herb]):
         return {
             "formulas": [],
@@ -353,9 +321,9 @@ def recommend_clinical_options(description=None, symptoms=None, effect=None, for
             "success": False,
             "message": "至少需要传入一个查询条件"
         }
-    
+
     result = call_kg_action("recommendClinicalOptions", params)
-    
+
     if not result.get("ok"):
         return {
             "formulas": [],
@@ -363,7 +331,7 @@ def recommend_clinical_options(description=None, symptoms=None, effect=None, for
             "success": False,
             "message": result.get("error", "查询失败"),
         }
-    
+
     data = result.get("data", {})
     if isinstance(data, dict):
         return {
@@ -380,7 +348,7 @@ def recommend_clinical_options(description=None, symptoms=None, effect=None, for
             "success": True,
             "message": "查询成功"
         }
-    
+
     return {
         "formulas": [],
         "related_herbs": [],
@@ -404,139 +372,138 @@ def query_kg_for_symptoms(symptoms, allergy_herbs=None):
             "success": False,
             "message": "症状列表为空"
         }
-    
+
     symptoms = symptoms[:5]
-    
+
     all_formulas = []
     all_zheng = []
     all_warnings = []
     raw_results = []
     all_raw_herb_names = []
     herb_name_to_index = {}
-    
-    import concurrent.futures
-    
+
     def query_single_symptom(symptom):
         try:
             kg_result = call_kg_service(symptom)
             return {"symptom": symptom, "result": kg_result}
-        except Exception as e:
-            return {"symptom": symptom, "result": {"error": str(e)}}
-    
-    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-        futures = [executor.submit(query_single_symptom, symptom) for symptom in symptoms]
-        for future in concurrent.futures.as_completed(futures):
-            try:
-                result = future.result()
-                raw_results.append(result)
-                symptom = result["symptom"]
-                kg_result = result["result"]
-                
-                if "error" in kg_result:
-                    all_warnings.append(f"症状 '{symptom}' 查询失败: {kg_result.get('error', '')}")
+        except Exception as exc:
+            logger.warning("kg_symptom_query_failed error=%s", type(exc).__name__)
+            return {"symptom": symptom, "result": {"error": "知识图谱服务暂不可用"}}
+
+    # 图谱服务自身有全局并发上限；这里顺序调用，避免每个请求临时创建线程池。
+    for symptom in symptoms:
+        try:
+            result = query_single_symptom(symptom)
+            raw_results.append(result)
+            symptom = result["symptom"]
+            kg_result = result["result"]
+
+            if "error" in kg_result:
+                all_warnings.append("症状查询失败：知识图谱服务暂不可用")
+                continue
+
+            formulas = kg_result.get("data", [])
+            for f in formulas:
+                formula_name = f.get("name", "")
+                if not formula_name:
                     continue
-                
-                formulas = kg_result.get("data", [])
-                for f in formulas:
-                    formula_name = f.get("name", "")
-                    if not formula_name:
-                        continue
-                    
-                    has_allergy_collision = False
-                    if allergy_herbs:
-                        herbs_in_formula = []
-                        prescription = f.get("prescription") or {}
-                        for herb in prescription.get("herbs", []):
-                            herbs_in_formula.append(herb.get("name", ""))
-                        
-                        for herb_name in herbs_in_formula:
-                            for allergy_herb in allergy_herbs:
-                                if allergy_herb in herb_name:
-                                    has_allergy_collision = True
-                                    break
-                            if has_allergy_collision:
+
+                has_allergy_collision = False
+                if allergy_herbs:
+                    herbs_in_formula = []
+                    prescription = f.get("prescription") or {}
+                    for herb in prescription.get("herbs", []):
+                        herbs_in_formula.append(herb.get("name", ""))
+
+                    for herb_name in herbs_in_formula:
+                        for allergy_herb in allergy_herbs:
+                            if allergy_herb in herb_name:
+                                has_allergy_collision = True
                                 break
-                    
-                    indications = f.get("indications", []) or []
-                    for indication in indications:
-                        for s in symptoms:
-                            if s in indication and indication not in all_zheng:
-                                all_zheng.append(indication)
-                    
-                    herbs_raw = []
-                    for h in (f.get("prescription") or {}).get("herbs", []):
-                        raw_name = h.get("name", "")
-                        if raw_name and any('\u4e00' <= c <= '\u9fff' for c in raw_name):
-                            herbs_raw.append({"raw_name": raw_name, "weight": h.get("weight", "")})
-                            if raw_name not in herb_name_to_index:
-                                herb_name_to_index[raw_name] = len(all_raw_herb_names)
-                                all_raw_herb_names.append(raw_name)
-                    
-                    formula_entry = {
-                        "name": formula_name,
-                        "matched_symptoms": f.get("matchedSymptoms", []),
-                        "_herbs_raw": herbs_raw,
-                        "effects": f.get("effects", []),
-                        "indications": indications,
-                        "usages": f.get("usages", []),
-                        "contraindications": f.get("contraindications", []),
-                        "sources": f.get("sources", []),
-                        "categories": f.get("categories", []),
-                        "source_url": f.get("sourceUrl", ""),
-                        "allergy_collision": has_allergy_collision,
-                    }
-                    all_formulas.append(formula_entry)
-            except Exception as e:
-                all_warnings.append(f"处理症状结果时出错: {str(e)}")
-    
+                        if has_allergy_collision:
+                            break
+
+                indications = f.get("indications", []) or []
+                for indication in indications:
+                    for symptom_text in symptoms:
+                        if symptom_text in indication and indication not in all_zheng:
+                            all_zheng.append(indication)
+
+                herbs_raw = []
+                for h in (f.get("prescription") or {}).get("herbs", []):
+                    raw_name = h.get("name", "")
+                    if raw_name and any('\u4e00' <= c <= '\u9fff' for c in raw_name):
+                        herbs_raw.append({"raw_name": raw_name, "weight": h.get("weight", "")})
+                        if raw_name not in herb_name_to_index:
+                            herb_name_to_index[raw_name] = len(all_raw_herb_names)
+                            all_raw_herb_names.append(raw_name)
+
+                formula_entry = {
+                    "name": formula_name,
+                    "matched_symptoms": f.get("matchedSymptoms", []),
+                    "_herbs_raw": herbs_raw,
+                    "effects": f.get("effects", []),
+                    "indications": indications,
+                    "usages": f.get("usages", []),
+                    "contraindications": f.get("contraindications", []),
+                    "sources": f.get("sources", []),
+                    "categories": f.get("categories", []),
+                    "source_url": f.get("sourceUrl", ""),
+                    "allergy_collision": has_allergy_collision,
+                }
+                all_formulas.append(formula_entry)
+        except Exception as exc:
+            logger.warning("kg_symptom_result_processing_failed error=%s", type(exc).__name__)
+            all_warnings.append("症状查询结果处理失败")
+
     all_indications = []
     for f in all_formulas:
         indications = f.get("indications", [])
         all_indications.extend(indications)
-    
+
     if all_indications:
         from langchain_community.chat_models.tongyi import ChatTongyi
         from langchain_core.messages import HumanMessage
-        
+
         model = os.getenv("LLM_MODEL_32B", "qwen-max")
         llm = ChatTongyi(model=model, temperature=0)
-        
+
         prompt = f"""你是一位专业的中医师，擅长从中医方剂的主治描述中提取标准证型名称。
-        
+
         用户症状：{', '.join(symptoms)}
-        
+
         方剂主治描述列表：
         {chr(10).join([f"{i+1}. {ind}" for i, ind in enumerate(all_indications[:50])])}
-        
+
         请从上述主治描述中，识别与用户症状最匹配的标准中医证型名称。
-        
+
         要求：
         1. 只提取一个最匹配的标准证型名称（如：外感风寒表实证、风寒表实证、太阳伤寒证等）
         2. 直接输出证型名称，不要任何解释或额外内容
         3. 证型名称长度在3-12个汉字之间
-        
+
         示例输出：外感风寒表实证"""
-        
+
         try:
             response = llm.invoke([HumanMessage(content=prompt)])
             syndrome_text = response.content.strip()
             if syndrome_text:
                 all_zheng = [syndrome_text]
-                print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] LLM提取证型: {all_zheng}")
-        except Exception as e:
-            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] LLM提取证型失败: {str(e)}")
+                logger.info("kg_syndrome_extracted count=%s", len(all_zheng))
+        except Exception as exc:
+            logger.warning("kg_syndrome_extraction_failed error=%s", type(exc).__name__)
             syndrome_pattern = re.compile(r'([\u4e00-\u9fff]{3,12}证)')
             for ind in all_indications:
                 matches = syndrome_pattern.findall(ind)
                 for match in matches:
                     if match not in all_zheng:
                         all_zheng.append(match)
-    
+
     all_symptoms_str = "、".join(symptoms)
     combined_result = call_kg_service(all_symptoms_str)
     if "error" not in combined_result:
-        combined_formulas = combined_result.get("formulas", [])
-        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 组合症状查询结果: {len(combined_formulas)} 个方剂")
+        combined_formulas = combined_result.get("data") or combined_result.get("formulas", [])
+        logger.info("kg_combined_query_completed formula_count=%s", len(combined_formulas))
         for f in combined_formulas:
             formula_name = f.get("name", "")
             if formula_name and formula_name not in [existing_f["name"] for existing_f in all_formulas]:
@@ -553,7 +520,7 @@ def query_kg_for_symptoms(symptoms, allergy_herbs=None):
                                 break
                         if has_allergy_collision:
                             break
-                
+
                 herbs_raw = []
                 for h in (f.get("prescription") or {}).get("herbs", []):
                     raw_name = h.get("name", "")
@@ -562,7 +529,7 @@ def query_kg_for_symptoms(symptoms, allergy_herbs=None):
                         if raw_name not in herb_name_to_index:
                             herb_name_to_index[raw_name] = len(all_raw_herb_names)
                             all_raw_herb_names.append(raw_name)
-                
+
                 formula_entry = {
                     "name": formula_name,
                     "matched_symptoms": f.get("matchedSymptoms", []),
@@ -577,29 +544,27 @@ def query_kg_for_symptoms(symptoms, allergy_herbs=None):
                     "allergy_collision": has_allergy_collision,
                 }
                 all_formulas.append(formula_entry)
-                print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 添加组合查询方剂: {formula_name}")
-                
+
                 indications = f.get("indications", [])
                 for indication in indications:
                     if any(kw in indication for kw in syndrome_keywords):
                         if indication not in all_zheng:
                             all_zheng.append(indication)
-                            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 从组合查询方剂 {formula_name} 提取证型: {indication}")
-    
+
     if all_raw_herb_names:
         try:
             cleaned_names = _clean_herb_name_batch(all_raw_herb_names)
-        except Exception as e:
-            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] LLM清洗药材名失败，使用备用方案: {str(e)}")
+        except Exception as exc:
+            logger.warning("herb_name_cleanup_fallback error=%s", type(exc).__name__)
             cleaned_names = all_raw_herb_names
-        
+
         cleaned_map = {}
         for i, raw_name in enumerate(all_raw_herb_names):
             cleaned = cleaned_names[i] if i < len(cleaned_names) else ""
             if not cleaned:
                 cleaned = re.sub(r'^\d+[\u4e00-\u9fff]*\s*', '', raw_name).strip()
             cleaned_map[raw_name] = cleaned
-        
+
         for f in all_formulas:
             f["herbs"] = []
             for h in f.pop("_herbs_raw", []):
@@ -612,7 +577,7 @@ def query_kg_for_symptoms(symptoms, allergy_herbs=None):
     else:
         for f in all_formulas:
             f["herbs"] = []
-    
+
     seen = set()
     unique_formulas = []
     for f in all_formulas:
@@ -620,13 +585,13 @@ def query_kg_for_symptoms(symptoms, allergy_herbs=None):
             seen.add(f["name"])
             unique_formulas.append(f)
     all_formulas = unique_formulas
-    
+
     safe_formulas = [f for f in all_formulas if not f["allergy_collision"]]
     unsafe_formulas = [f for f in all_formulas if f["allergy_collision"]]
-    
+
     symptom_set = set(symptoms)
     safe_formulas.sort(key=lambda f: -sum(1 for s in symptom_set if any(s in ind for ind in f.get("indications", []))))
-    
+
     final_prescription = []
     for f in safe_formulas[:5]:
         final_prescription.append({
@@ -639,7 +604,7 @@ def query_kg_for_symptoms(symptoms, allergy_herbs=None):
             "sources": f["sources"],
             "categories": f["categories"],
         })
-    
+
     all_herbs_list = []
     for f in safe_formulas:
         for h in f["herbs"]:
@@ -650,9 +615,9 @@ def query_kg_for_symptoms(symptoms, allergy_herbs=None):
         if h and h not in seen_h:
             seen_h.add(h)
             unique_herbs_list.append(h)
-    
+
     all_zheng.sort(key=lambda z: (0 if "证" in z else 1, -len(z)))
-    
+
     result = {
         "symptoms": symptoms,
         "zheng": [{"syndrome": z, "treatment_principle": "", "description": ""} for z in all_zheng[:5]],
@@ -674,7 +639,7 @@ def query_kg_for_symptoms(symptoms, allergy_herbs=None):
         "message": "查询成功",
         "raw": {"symptom": ",".join(symptoms), "formula_count": len(all_formulas)}
     }
-    
+
     return result
 
 _custom_query_extractor = None
@@ -693,7 +658,7 @@ def _extract_query_target(query_text: str) -> dict:
     """用 LLM 提取用户的查询目标（药名/方剂名/证型/症状等）"""
     if not query_text:
         return {"raw": query_text, "keywords": [query_text] if query_text else [], "query_type": "unknown"}
-    
+
     try:
         extractor = _get_custom_query_extractor()
         prompt = f"""你是中医查询意图分析器。从用户输入中提取关键查询词。
@@ -705,11 +670,11 @@ def _extract_query_target(query_text: str) -> dict:
 - query_type: 药名查询(herb) / 方剂查询(formula) / 症状查询(symptom) / 证型查询(syndrome) / 未知(unknown)
 
 只输出严格的 JSON："""
-        
+
         from langchain_core.messages import HumanMessage
         response = extractor.invoke([HumanMessage(content=prompt)])
         result_text = response.content.strip()
-        
+
         import re
         json_match = re.search(r'\{[^{}]*\}', result_text, re.DOTALL)
         if json_match:
@@ -720,9 +685,9 @@ def _extract_query_target(query_text: str) -> dict:
                 "keywords": data.get("keywords", [query_text]),
                 "query_type": data.get("query_type", "unknown")
             }
-    except Exception as e:
-        print(f"查询意图提取失败: {e}")
-    
+    except Exception as exc:
+        logger.warning("kg_query_intent_extraction_failed error=%s", type(exc).__name__)
+
     return {"raw": query_text, "keywords": [query_text], "query_type": "unknown"}
 
 
@@ -734,15 +699,15 @@ def custom_query_kg(query_text):
             "success": False,
             "message": "查询内容为空"
         }
-    
+
     intent_info = _extract_query_target(query_text)
     keywords = intent_info.get("keywords", [query_text])
     query_type = intent_info.get("query_type", "unknown")
-    
+
     query_input = " ".join(keywords) if isinstance(keywords, list) else str(keywords)
-    
+
     kg_result = call_kg_service(query_input)
-    
+
     if "error" in kg_result:
         return {
             "query": query_text,
@@ -751,9 +716,9 @@ def custom_query_kg(query_text):
             "message": kg_result["error"],
             "intent": intent_info
         }
-    
+
     results = []
-    
+
     if kg_result.get("formulas"):
         for f in kg_result["formulas"]:
             effects = "、".join(f.get("effects", [])) if isinstance(f.get("effects"), list) else f.get("effects", "")
@@ -768,7 +733,7 @@ def custom_query_kg(query_text):
                 "name": f.get("name", ""),
                 "description": desc
             })
-    
+
     if not results:
         for k in ["matchedSymptoms", "matchedQueryTerms", "queryTerms"]:
             for item in kg_result.get(k, []) or []:
@@ -777,7 +742,7 @@ def custom_query_kg(query_text):
                     "name": str(item),
                     "description": ""
                 })
-    
+
     return {
         "query": query_text,
         "results": results[:10],
@@ -787,58 +752,17 @@ def custom_query_kg(query_text):
         "raw": kg_result
     }
 
-CASE_KG_SERVICE_PATH = os.path.join(os.path.dirname(__file__), "neo4j_case", "neo4j_agent_api.js")
-
-
 def call_case_kg_service(action: str, params: dict = None, timeout: int = 60):
     """调用 neo4j_case（医案知识图谱）服务"""
     if not action:
         return {"ok": False, "error": "action is required"}
-    
-    params = params or {}
-    params_str = json.dumps(params, ensure_ascii=False)
-    
-    env = os.environ.copy()
-    env.pop("NEO4J_URI", None)
-    env.pop("NEO4J_USERNAME", None)
-    env.pop("NEO4J_PASSWORD", None)
-    env.pop("NEO4J_DATABASE", None)
-    
-    try:
-        case_service_dir = os.path.dirname(CASE_KG_SERVICE_PATH)
-        result = subprocess.run(
-            ["node", CASE_KG_SERVICE_PATH, action, params_str],
-            capture_output=True,
-            text=True,
-            encoding='utf-8',
-            errors='replace',
-            timeout=timeout,
-            env=env,
-            cwd=case_service_dir
-        )
-        
-        if result.returncode != 0:
-            error_msg = result.stderr.strip() if result.stderr else f"Exit code {result.returncode}"
-            return {"ok": False, "error": error_msg}
-        
-        output = result.stdout.strip()
-        if not output:
-            return {"ok": False, "error": "neo4j_case 服务返回空结果"}
-        
-        try:
-            return json.loads(output)
-        except json.JSONDecodeError as e:
-            return {"ok": False, "error": f"JSON解析失败: {str(e)}", "raw_output": output}
-            
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "error": "neo4j_case 服务调用超时"}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
+
+    return _query_kg_service("/case/query", action, params or {}, timeout)
 
 
 def search_medical_cases(query: str, query_type: str = "auto", limit: int = 5):
     """检索医案，支持按症状/方剂/证型/病名检索
-    
+
     Args:
         query: 查询关键词
         query_type: auto/symptom/formula/syndrome/disease/keyword
@@ -853,10 +777,10 @@ def search_medical_cases(query: str, query_type: str = "auto", limit: int = 5):
             "success": False,
             "message": "查询关键词为空"
         }
-    
+
     if query_type == "auto":
         query_type = _detect_case_query_type(query)
-    
+
     action_map = {
         "symptom": ("searchCases", {"keyword": query, "limit": limit}),
         "keyword": ("searchCases", {"keyword": query, "limit": limit}),
@@ -864,10 +788,10 @@ def search_medical_cases(query: str, query_type: str = "auto", limit: int = 5):
         "syndrome": ("searchBySyndrome", {"syndrome": query, "limit": limit}),
         "disease": ("searchByDisease", {"disease": query, "limit": limit}),
     }
-    
+
     action, params = action_map.get(query_type, action_map["keyword"])
     kg_result = call_case_kg_service(action, params)
-    
+
     if not kg_result.get("ok"):
         return {
             "query": query,
@@ -877,7 +801,7 @@ def search_medical_cases(query: str, query_type: str = "auto", limit: int = 5):
             "success": False,
             "message": kg_result.get("error", "查询失败")
         }
-    
+
     data = kg_result.get("data", [])
     return {
         "query": query,
@@ -903,7 +827,7 @@ def search_medical_cases_by_clinical_options(symptoms=None, syndrome=None, formu
         params["disease"] = disease
     if description:
         params["description"] = description
-    
+
     if not any([symptoms, syndrome, formula, disease, description]):
         return {
             "cases": [],
@@ -911,9 +835,9 @@ def search_medical_cases_by_clinical_options(symptoms=None, syndrome=None, formu
             "success": False,
             "message": "至少需要传入一个查询条件"
         }
-    
+
     kg_result = call_case_kg_service("recommendClinicalOptions", params)
-    
+
     if not kg_result.get("ok"):
         return {
             "cases": [],
@@ -921,7 +845,7 @@ def search_medical_cases_by_clinical_options(symptoms=None, syndrome=None, formu
             "success": False,
             "message": kg_result.get("error", "查询失败")
         }
-    
+
     data = kg_result.get("data", {})
     if isinstance(data, dict):
         cases = data.get("cases", [])
@@ -932,7 +856,7 @@ def search_medical_cases_by_clinical_options(symptoms=None, syndrome=None, formu
     else:
         cases = []
         recommended_formulas = []
-    
+
     return {
         "cases": cases,
         "recommended_formulas": recommended_formulas,
@@ -949,15 +873,15 @@ def get_medical_case_detail(case_id=None, title=None, limit: int = 5):
         params["caseId"] = case_id
     if title:
         params["title"] = title
-    
+
     if not case_id and not title:
         return {"success": False, "message": "caseId 或 title 至少传一个"}
-    
+
     kg_result = call_case_kg_service("getCaseDetail", params)
-    
+
     if not kg_result.get("ok"):
         return {"success": False, "message": kg_result.get("error", "查询失败")}
-    
+
     return {
         "cases": kg_result.get("data", []),
         "success": True,
@@ -1034,44 +958,36 @@ def _detect_case_query_type(query: str) -> str:
     text = (query or "").strip()
     if not text:
         return "keyword"
-    
+
     if re.search(r"(汤|散|丸|膏|丹|饮|方|剂)$", text):
         return "formula"
-    
+
     disease_kw = ["炎", "癌", "瘤", "病", "症", "综合征"]
     if any(kw in text for kw in disease_kw) and len(text) <= 8:
         return "disease"
-    
+
     syndrome_kw = ["虚", "实", "寒", "热", "湿", "瘀", "郁", "结", "不足", "亏损", "壅盛", "失调"]
     if any(kw in text for kw in syndrome_kw) and len(text) <= 8:
         return "syndrome"
-    
+
     return "symptom"
 
 
 def save_kg_raw_result(symptoms, allergy_herbs=None, filename="kg_raw_result.txt"):
+    """兼容旧调试入口；诊疗数据不再落盘为调试文件。"""
     input_text = ",".join(symptoms)
     if allergy_herbs and len(allergy_herbs) > 0:
         allergy_text = "，并且对" + "、".join(allergy_herbs) + "过敏"
         input_text += allergy_text
-    
+
     kg_result = call_kg_service(input_text)
-    
-    with open(filename, "w", encoding="utf-8") as f:
-        f.write("=" * 60 + "\n")
-        f.write(f"输入: {input_text}\n")
-        f.write("=" * 60 + "\n")
-        f.write(json.dumps(kg_result, ensure_ascii=False, indent=2))
-        f.write("\n")
-    
-    print(f"知识图谱原始结果已保存到: {filename}")
+    logger.warning("kg_debug_export_disabled")
     return kg_result
 
 if __name__ == "__main__":
     test_symptoms = ["头痛", "发寒", "无汗"]
     test_allergy = ["麻黄", "桂枝"]
     save_kg_raw_result(test_symptoms, test_allergy)
-    
+
     result = query_kg_for_symptoms(test_symptoms, test_allergy)
-    print("\n解析后的结果:")
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+    logger.info("kg_manual_check_completed success=%s", bool(result.get("success")))

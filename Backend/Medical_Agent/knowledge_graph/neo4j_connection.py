@@ -16,9 +16,11 @@ class Neo4jConnection:
 
     def connect(self):
         if self._driver is None:
-            uri = os.getenv('NEO4J_URI', 'bolt://localhost:7687')
-            user = os.getenv('NEO4J_USER', 'neo4j')
-            password = os.getenv('NEO4J_PASSWORD', 'password')
+            uri = os.getenv('NEO4J_URI')
+            user = os.getenv('NEO4J_USER')
+            password = os.getenv('NEO4J_PASSWORD')
+            if not uri or not user or not password:
+                raise RuntimeError('NEO4J_URI、NEO4J_USER、NEO4J_PASSWORD 必须配置')
             try:
                 self._driver = GraphDatabase.driver(uri, auth=(user, password))
                 with self._driver.session() as session:

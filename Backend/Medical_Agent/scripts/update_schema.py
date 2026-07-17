@@ -1,6 +1,7 @@
 import pymysql
+import os
 
-conn = pymysql.connect(host='localhost', user='root', password='TANXIAOYU', db='traditional_medical', port=3306)
+conn = pymysql.connect(host=os.environ['MYSQL_HOST'], user=os.environ['MYSQL_USER'], password=os.environ['MYSQL_PASSWORD'], db=os.environ['MYSQL_DB'], port=int(os.getenv('MYSQL_PORT', '3306')))
 cursor = conn.cursor()
 
 try:
@@ -28,10 +29,6 @@ try:
     cursor.execute('ALTER TABLE api_patient DROP COLUMN user_id')
     print('Dropped user_id from api_patient')
     
-    cursor.execute("UPDATE api_doctor SET username='doctor.lin', password='Prototype123' WHERE doctor_id='D001'")
-    cursor.execute("UPDATE api_doctor SET username='doctor.zhou', password='Prototype123' WHERE doctor_id='D002'")
-    cursor.execute("UPDATE api_doctor SET username='doctor.zhang', password='Prototype123' WHERE doctor_id='D003'")
-    cursor.execute("UPDATE api_doctor SET username='doctor.chen', password='Prototype123' WHERE doctor_id='D004'")
     print('Updated doctor data')
     
     conn.commit()

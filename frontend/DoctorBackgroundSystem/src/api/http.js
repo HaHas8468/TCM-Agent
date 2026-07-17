@@ -1,5 +1,5 @@
-// 后续如果后端不是同源部署，统一在这里填写 baseURL，例如：http://127.0.0.1:8000
-const CUSTOM_API_BASE_URL = 'http://111.119.237.88:16009'
+// 本地 Docker 部署通过 Nginx 暴露在 80 端口；生产环境通过 VITE_API_BASE_URL 覆盖。
+const CUSTOM_API_BASE_URL = 'http://127.0.0.1'
 
 export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || CUSTOM_API_BASE_URL
 
