@@ -1,0 +1,625 @@
+============================================================
+中医药诊疗智能体 API 接口测试用例（Postman）
+============================================================
+
+测试环境：http://localhost:8000
+
+说明：
+- 所有需要登录的接口需携带 Authorization: Bearer <token>
+- 响应格式统一：成功 { "code": 0, "data": {...} }，失败 { "code": 非0, "msg": "..." }
+- 时间字段格式：ISO8601（YYYY-MM-DDTHH:mm:ss）
+
+============================================================
+一、鉴权相关（3个接口）
+============================================================
+
+【1】患者注册
+POST /api/auth/register
+Headers:
+    Content-Type: application/json
+
+Body:
+{
+    "username": "zhangsan",
+    "password": "12345678",
+    "confirm_password": "12345678"
+}
+
+预期响应：
+{
+    "code": 0,
+    "data": {
+        "patient_id": "P20260711..."
+    }
+}
+
+---
+
+【2】患者登录
+POST /api/auth/login
+Headers:
+    Content-Type: application/json
+
+Body:
+{
+    "username": "zhangsan",
+    "password": "12345678"
+}
+
+预期响应：
+{
+    "code": 0,
+    "data": {
+        "token": "99999999999999999999999999999999999",
+        "patient_id": "P20260711...",
+        "name": "zhangsan"
+    }
+}
+
+---
+
+【3】医生登录
+POST /api/doctor/auth/login
+Headers:
+    Content-Type: application/json
+
+Body:
+{
+    "username": "doctor.lin",
+    "password": "Prototype123"
+}
+
+预期响应：
+{
+    "code": 0,
+    "data": {
+        "token": "99999999999999999999999999999999999",
+        "doctor_id": "D001",
+        "name": "林青和",
+        "department": "中医内科",
+        "default_landing": "queue"
+    }
+}
+
+============================================================
+二、患者档案（2个接口）
+============================================================
+
+【4】获取个人档案
+GET /api/patient/profile
+Headers:
+    Authorization: Bearer <患者token>
+
+预期响应：
+{
+    "code": 0,
+    "data": {
+        "patient_id": "P20260711...",
+        "name": "zhangsan",
+        "gender": "男",
+        "birth_date": null,
+        "age": 0,
+        "phone": null,
+        "allergy_history": null
+    }
+}
+
+---
+
+【5】更新个人档案
+PUT /api/patient/profile
+Headers:
+    Authorization: Bearer <患者token>
+    Content-Type: application/json
+
+Body:
+{
+    "name": "张三",
+    "gender": "女",
+    "birth_date": "1995-06-15",
+    "age": 31,
+    "phone": "138****1234",
+    "allergy_history": ["麻黄", "桂枝"]
+}
+
+预期响应：
+{
+    "code": 0,
+    "data": null
+}
+
+============================================================
+三、AI智能挂号/问诊（1个接口）
+============================================================
+
+【6】AI问诊多轮对话
+POST /api/agent/chat
+Headers:
+    Content-Type: application/json
+
+Body:
+{
+    "session_id": "S20260711001",
+    "patient_id": "P001",
+    "user_input": "我最近头痛，发冷",
+    "mode": "normal",
+    "scene": "guide"
+}
+
+预期响应（asking状态）：
+{
+    "code": 0,
+    "data": {
+        "status": "asking",
+        "response": "根据您目前描述的「头痛, 恶寒」等症状，初步建议您优先考虑挂【呼吸内科/中医内科】...",
+        "session_id": "S20260711001",
+        "ask_round": 1
+    }
+}
+
+预期响应（diagnosed状态）：
+{
+    "code": 0,
+    "data": {
+        "status": "diagnosed",
+        "session_id": "S20260711001",
+        "response": "根据您症状，辨证为风寒表实证，建议使用麻黄汤。",
+        "diagnosis": {
+            "syndrome": "风寒表实证",
+            "prescription": "麻黄汤",
+            "ingredients": ["麻黄", "桂枝", "杏仁", "甘草"],
+            "department": "呼吸内科/中医内科",
+            "allergy_warnings": ["麻黄"]
+        }
+    }
+}
+
+============================================================
+四、挂号（3个接口）
+============================================================
+
+【7】科室列表（含医生）
+GET /api/departments
+
+预期响应：
+{
+    "code": 0,
+    "data": [
+        {
+            "department": "中医内科",
+            "doctors": [
+                { "doctor_id": "D001", "name": "林青和", "specialty": "呼吸系统疾病" },
+                { "doctor_id": "D002", "name": "周闻素", "specialty": "脾胃病" }
+            ]
+        },
+        {
+            "department": "针灸科",
+            "doctors": [
+                { "doctor_id": "D003", "name": "张医生", "specialty": "针灸" }
+            ]
+        }
+    ]
+}
+
+---
+
+【8】医生可预约时段
+GET /api/doctors/D001/slots?date=2026-07-10
+
+预期响应：
+{
+    "code": 0,
+    "data": {
+        "doctor_id": "D001",
+        "date": "2026-07-10",
+        "available_slots": ["08:00", "09:00", "10:00", "11:00", "14:00", "15:00", "16:00", "17:00"]
+    }
+}
+
+---
+
+【9】创建挂号订单
+POST /api/orders
+Headers:
+    Authorization: Bearer <患者token>
+    Content-Type: application/json
+
+Body:
+{
+    "doctor_id": "D001",
+    "department": "中医内科",
+    "date": "2026-07-15",
+    "time": "09:00",
+    "source": "smart"
+}
+
+预期响应：
+{
+    "code": 0,
+    "data": {
+        "order_id": "O20260715...",
+        "status": "pending",
+        "doctor_id": "D001",
+        "date": "2026-07-15",
+        "time": "09:00"
+    }
+}
+
+============================================================
+五、医生接诊（4个接口）
+============================================================
+
+【10】今日接诊队列
+GET /api/doctor/queue?date=2026-07-10&department=中医内科&period=all
+Headers:
+    Authorization: Bearer <医生token>
+
+预期响应：
+{
+    "code": 0,
+    "data": [
+        {
+            "order_id": "O20260710001",
+            "patient_id": "P001",
+            "patient_name": "张三",
+            "department": "中医内科",
+            "time": "09:00",
+            "status": "pending"
+        }
+    ],
+    "kpi": {
+        "today_total": 2,
+        "pending": 1,
+        "ongoing": 0,
+        "finished": 1
+    }
+}
+
+---
+
+【11】接诊（开始问诊）
+PUT /api/orders/O20260710001/start
+Headers:
+    Authorization: Bearer <医生token>
+
+预期响应：
+{
+    "code": 0,
+    "data": {
+        "order_id": "O20260710001",
+        "status": "ongoing"
+    }
+}
+
+---
+
+【12】完成接诊
+PUT /api/orders/O20260710001/finish
+Headers:
+    Authorization: Bearer <医生token>
+    Content-Type: application/json
+
+Body:
+{
+    "syndrome": "风寒表实证",
+    "prescription": "麻黄汤",
+    "ingredients": ["麻黄", "桂枝", "杏仁", "甘草"],
+    "advice": "避风寒，清淡饮食"
+}
+
+预期响应：
+{
+    "code": 0,
+    "data": {
+        "order_id": "O20260710001",
+        "status": "finished"
+    }
+}
+
+---
+
+【13】暂存（不结束）
+PUT /api/orders/O20260710001/save
+Headers:
+    Authorization: Bearer <医生token>
+    Content-Type: application/json
+
+Body:
+{
+    "syndrome": "风寒表实证",
+    "prescription": "麻黄汤"
+}
+
+预期响应：
+{
+    "code": 0,
+    "data": {
+        "order_id": "O20260710001",
+        "status": "ongoing"
+    }
+}
+
+============================================================
+六、面诊四诊补录（1个接口）
+============================================================
+
+【14】提交四诊信息
+POST /api/orders/O20260710001/diagnosis
+Headers:
+    Authorization: Bearer <医生token>
+    Content-Type: application/json
+
+Body:
+{
+    "chief_complaint": "头痛3天",
+    "present_illness": "受凉后出现头痛，恶寒，无汗",
+    "tongue": "舌淡红苔薄白",
+    "pulse": "脉浮紧",
+    "symptoms": ["头痛", "恶寒", "无汗"],
+    "signs": "体温37.5℃",
+    "other": "无既往史"
+}
+
+预期响应：
+{
+    "code": 0,
+    "data": {
+        "order_id": "O20260710001"
+    }
+}
+
+============================================================
+七、病历管理（3个接口）
+============================================================
+
+【15】病历检索
+GET /api/records?name=张三&patient_id=P001&syndrome=风寒&date_from=2026-01-01&date_to=2026-12-31&page=1&page_size=20
+Headers:
+    Authorization: Bearer <医生token>
+
+预期响应：
+{
+    "code": 0,
+    "data": {
+        "list": [],
+        "total": 0,
+        "page": 1,
+        "page_size": 20
+    }
+}
+
+---
+
+【16】单次门诊病历详情
+GET /api/records/R001
+Headers:
+    Authorization: Bearer <医生token>
+
+预期响应（未找到）：
+{
+    "code": 404,
+    "msg": "Record not found"
+}
+
+---
+
+【17】患者历史病历
+GET /api/patient/P001/history
+Headers:
+    Authorization: Bearer <患者token>
+
+预期响应：
+{
+    "code": 0,
+    "data": {
+        "patient_id": "P001",
+        "history_syndromes": [],
+        "allergy_history": []
+    }
+}
+
+============================================================
+八、历史诊断（患者端，1个接口）
+============================================================
+
+【18】患者历史诊断列表
+GET /api/patient/diagnosis-history?status=all
+Headers:
+    Authorization: Bearer <患者token>
+
+预期响应：
+{
+    "code": 0,
+    "data": []
+}
+
+---
+
+【19】历史诊断详情（挂号/病历详情）
+GET /api/orders/O20260710001
+Headers:
+    Authorization: Bearer <患者token>
+
+预期响应（未找到）：
+{
+    "code": 404,
+    "msg": "Order not found"
+}
+
+============================================================
+九、信息中心同步（1个接口）
+============================================================
+
+【20】同步最近一次诊断
+GET /api/patient/latest-diagnosis
+Headers:
+    Authorization: Bearer <患者token>
+
+预期响应（无诊断记录）：
+{
+    "code": 0,
+    "data": null
+}
+
+============================================================
+十、医生设置（2个接口）
+============================================================
+
+【21】获取医生个人资料
+GET /api/doctor/profile
+Headers:
+    Authorization: Bearer <医生token>
+
+预期响应：
+{
+    "code": 0,
+    "data": {
+        "doctor_id": "D001",
+        "name": "林青和",
+        "role": "doctor",
+        "username": "doctor.lin",
+        "phone": "13900001111",
+        "department": "中医内科",
+        "duty_time": "周一至周五 8:00-17:00",
+        "specialty": "呼吸系统疾病",
+        "bio": "从事中医临床20年，擅长呼吸系统疾病诊治"
+    }
+}
+
+---
+
+【22】更新医生个人资料
+PUT /api/doctor/profile
+Headers:
+    Authorization: Bearer <医生token>
+    Content-Type: application/json
+
+Body:
+{
+    "phone": "139****5678",
+    "duty_time": "周一至周六 8:00-17:00"
+}
+
+预期响应：
+{
+    "code": 0,
+    "data": null
+}
+
+============================================================
+附：其他辅助接口
+============================================================
+
+【24】健康检查
+GET /health
+
+预期响应：
+{
+    "code": 0,
+    "data": {
+        "status": "healthy",
+        "neo4j_connected": true
+    }
+}
+
+---
+
+【25】证型列表
+GET /diagnosis/zheng-types
+
+预期响应：
+{
+    "code": 0,
+    "data": [...]
+}
+
+---
+
+【26】按症状查询证型
+GET /diagnosis/zheng-by-symptoms?symptoms=头痛&symptoms=恶寒
+
+预期响应：
+{
+    "code": 0,
+    "data": [...]
+}
+
+---
+
+【27】搜索中药
+GET /herbs/search?keyword=麻黄
+
+预期响应：
+{
+    "code": 0,
+    "data": [...]
+}
+
+---
+
+【28】搜索方剂
+GET /formulas/search?keyword=麻黄汤
+
+预期响应：
+{
+    "code": 0,
+    "data": [...]
+}
+
+---
+
+【29】搜索医案
+GET /records/search?disease_name=&zheng_type=风寒&formula_name=
+
+预期响应：
+{
+    "code": 0,
+    "data": [...]
+}
+
+---
+
+【30】知识查询
+POST /knowledge/query
+Headers:
+    Content-Type: application/json
+
+Body:
+{
+    "query_type": "herb_detail",
+    "keyword": "麻黄"
+}
+
+预期响应：
+{
+    "code": 0,
+    "data": {
+        "query_type": "herb_detail",
+        "data": {...}
+    }
+}
+
+============================================================
+测试流程建议
+============================================================
+
+1. 先注册患者账号 → 登录获取患者token
+2. 登录医生账号获取医生token
+3. 查询科室列表 → 获取医生ID
+4. 查询医生可预约时段
+5. 创建挂号订单
+6. 医生查看接诊队列
+7. 医生开始接诊 → 提交四诊信息 → 完成接诊
+8. 患者查看历史诊断
+
+============================================================
+Postman环境变量建议
+============================================================
+
+在Postman中创建环境变量：
+- base_url: http://localhost:8000
+- patient_token: {{患者登录后获取的token}}
+- doctor_token: {{医生登录后获取的token}}
+
+Authorization header使用：
+Bearer {{patient_token}} 或 Bearer {{doctor_token}}

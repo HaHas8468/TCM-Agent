@@ -1,0 +1,9 @@
+langchain-community==0.4.2
+langchain-core==1.4.8
+langgraph==1.2.7
+langgraph-checkpoint==4.1.1
+pydantic==2.12.5
+python-dotenv==1.2.1
+httpx==0.28.1
+dashscope==1.26.2
+neo4j==5.24.0

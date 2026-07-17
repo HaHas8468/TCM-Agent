@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>本草问方 - 用户设置</title>
+    <style>
+        /* --- 基础与变量 (保持与主页一致) --- */
+        :root {
+            --primary-color: #2D6A4F; 
+            --primary-dark: #1B4332;
+            --primary-light: #E8F5E9;
+            --bg-color: #F4F7F5; 
+            --text-main: #2C3E35;
+            --text-sub: #677A71;
+            --white: #FFFFFF;
+            --border-color: #E0EAE4;
+            --shadow-sm: 0 4px 12px rgba(45, 106, 79, 0.04);
+            --shadow-md: 0 8px 24px rgba(45, 106, 79, 0.08);
+            --radius-md: 12px;
+            --radius-lg: 16px;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+
+        body { background-color: var(--bg-color); color: var(--text-main); display: flex; height: 100vh; overflow: hidden; }
+
+        /* --- 主侧边栏 (保持原样) --- */
+        .sidebar {
+            width: 260px;
+            background-color: var(--white);
+            border-right: 1px solid var(--border-color);
+            display: flex;
+            flex-direction: column;
+            padding: 24px 16px;
+            z-index: 10;
+        }
+
+        .brand { font-size: 20px; font-weight: 700; color: var(--primary-dark); letter-spacing: 2px; margin-bottom: 24px; padding: 0 8px; }
+        
+        .doctor-card {
+            background: linear-gradient(135deg, var(--primary-color), var(--primary-dark));
+            color: var(--white);
+            border-radius: var(--radius-lg);
+            padding: 20px;
+            margin-bottom: 24px;
+            box-shadow: var(--shadow-md);
+        }
+
+        .status-toggle { background: rgba(255, 255, 255, 0.2); border-radius: 20px; display: flex; padding: 4px; margin-bottom: 16px; }
+        .status-toggle span { flex: 1; text-align: center; font-size: 13px; padding: 6px 0; border-radius: 16px; cursor: pointer; }
+        .status-toggle span.active { background: var(--white); color: var(--primary-color); font-weight: 600; }
+        .doc-name { font-size: 18px; font-weight: 600; margin-bottom: 4px; }
+        .doc-title { font-size: 12px; opacity: 0.8; margin-bottom: 12px; }
+        .doc-info { font-size: 11px; opacity: 0.7; line-height: 1.6; }
+
+        .nav-menu { list-style: none; flex: 1; }
+        .nav-item {
+            padding: 12px 16px;
+            margin-bottom: 8px;
+            border-radius: var(--radius-md);
+            color: var(--text-sub);
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+        .nav-item:hover { background-color: #F0F5F2; color: var(--primary-color); }
+        .nav-item.active { background-color: var(--primary-light); color: var(--primary-color); font-weight: 600; border: 1px solid var(--primary-color); }
+
+        /* --- 主内容区 --- */
+        .main-content {
+            flex: 1;
+            padding: 32px 40px;
+            overflow-y: auto;
+        }
+
+        .page-title { font-size: 24px; color: var(--primary-dark); font-weight: 600; margin-bottom: 24px; }
+
+        /* --- 内部设置面板布局 --- */
+        .settings-wrapper {
+            display: flex;
+            gap: 24px;
+            align-items: flex-start;
+        }
+
+        /* 内部设置导航 */
+        .settings-nav {
+            width: 220px;
+            background: var(--white);
+            border-radius: var(--radius-lg);
+            padding: 16px;
+            box-shadow: var(--shadow-sm);
+            border: 1px solid var(--border-color);
+        }
+
+        .settings-nav-item {
+            padding: 14px 16px;
+            border-radius: 8px;
+            font-size: 14px;
+            color: var(--text-main);
+            font-weight: 500;
+            cursor: pointer;
+            margin-bottom: 4px;
+            transition: all 0.2s;
+        }
+
+        .settings-nav-item:hover { background: #F0F5F2; }
+        .settings-nav-item.active { background: var(--primary-light); color: var(--primary-color); }
+        .settings-nav-item.danger { color: #D32F2F; margin-top: 16px; border-top: 1px solid #F0F5F2; border-radius: 0 0 8px 8px; }
+        .settings-nav-item.danger:hover { background: #FFEBEE; }
+
+        /* 内部表单区域 */
+        .settings-body {
+            flex: 1;
+            background: var(--white);
+            border-radius: var(--radius-lg);
+            padding: 32px;
+            box-shadow: var(--shadow-sm);
+            border: 1px solid var(--border-color);
+        }
+
+        .section-title { font-size: 18px; font-weight: 600; color: var(--primary-dark); margin-bottom: 24px; padding-bottom: 12px; border-bottom: 1px solid var(--border-color); }
+
+        /* 头像上传区 */
+        .avatar-upload { display: flex; align-items: center; gap: 24px; margin-bottom: 32px; }
+        .avatar-circle {
+            width: 72px; height: 72px;
+            border-radius: 50%;
+            background-color: var(--primary-color);
+            color: var(--white);
+            display: flex; justify-content: center; align-items: center;
+            font-size: 28px; font-weight: 600;
+        }
+        .btn-outline {
+            background: transparent;
+            border: 1px solid var(--border-color);
+            color: var(--text-main);
+            padding: 8px 16px;
+            border-radius: 8px;
+            font-size: 13px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .btn-outline:hover { border-color: var(--primary-color); color: var(--primary-color); }
+
+        /* 表单网格 */
+        .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-bottom: 24px; }
+        .form-group { display: flex; flex-direction: column; gap: 8px; }
+        .form-group.full-width { grid-column: span 2; }
+        
+        .form-label { font-size: 13px; color: var(--text-sub); font-weight: 500; }
+        .form-control {
+            padding: 10px 14px;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            font-size: 14px;
+            color: var(--text-main);
+            outline: none;
+            transition: border 0.2s;
+        }
+        .form-control:focus { border-color: var(--primary-color); box-shadow: 0 0 0 3px rgba(45, 106, 79, 0.1); }
+        .form-control:disabled { background-color: #F9FAFB; color: #9CA3AF; cursor: not-allowed; }
+
+        /* 保存按钮区 */
+        .form-actions { display: flex; justify-content: flex-end; margin-top: 32px; gap: 16px; }
+        .btn-primary {
+            background-color: var(--primary-color);
+            color: var(--white);
+            border: none;
+            padding: 10px 24px;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .btn-primary:hover { background-color: var(--primary-dark); }
+    </style>
+</head>
+<body>
+
+    <aside class="sidebar">
+        <div class="brand">本草问方</div>
+        <div class="doctor-card">
+            <div class="status-toggle">
+                <span class="active">值班</span>
+                <span>休息</span>
+            </div>
+            <div class="doc-name">林知夏</div>
+            <div class="doc-title">中医内科主任医师 · 管理员</div>
+            <div class="doc-info">青囊中医院智慧门诊<br>周一门诊 08:00 - 17:00<br>脾胃病、肺系病、亚健康调理</div>
+        </div>
+        <ul class="nav-menu">
+            <li class="nav-item">接诊队列</li>
+            <li class="nav-item">问诊工作台</li>
+            <li class="nav-item">病历管理</li>
+            <li class="nav-item">个人医案库</li>
+            <li class="nav-item">系统统计</li>
+            <li class="nav-item active">用户设置</li>
+            <li class="nav-item">用户管理</li>
+        </ul>
+    </aside>
+
+    <main class="main-content">
+        <h1 class="page-title">用户设置</h1>
+
+        <div class="settings-wrapper">
+            
+            <div class="settings-nav">
+                <div class="settings-nav-item active">个人资料</div>
+                <div class="settings-nav-item">账号安全</div>
+                <div class="settings-nav-item">偏好与通知</div>
+                <div class="settings-nav-item danger">退出登录</div>
+            </div>
+
+            <div class="settings-body">
+                <h2 class="section-title">个人资料</h2>
+                
+                <div class="avatar-upload">
+                    <div class="avatar-circle">林</div>
+                    <div>
+                        <button class="btn-outline">更换头像</button>
+                        <p style="font-size: 12px; color: var(--text-sub); margin-top: 8px;">支持 JPG、PNG 格式，大小不超过 2MB</p>
+                    </div>
+                </div>
+
+                <div class="form-grid">
+                    <div class="form-group">
+                        <label class="form-label">姓名</label>
+                        <input type="text" class="form-control" value="林知夏">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">医生账号 (工号)</label>
+                        <input type="text" class="form-control" value="doctor.lin" disabled>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">所属科室</label>
+                        <input type="text" class="form-control" value="中医内科">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">职称级别</label>
+                        <input type="text" class="form-control" value="主任医师">
+                    </div>
+                    <div class="form-group full-width">
+                        <label class="form-label">专业擅长 (门诊信息显示)</label>
+                        <input type="text" class="form-control" value="脾胃病、肺系病、亚健康调理">
+                    </div>
+                    <div class="form-group full-width">
+                        <label class="form-label">个人简介</label>
+                        <textarea class="form-control" rows="4">师从国家级名老中医，从事中医临床工作二十余年，擅长运用经典名方结合现代中药药理，对各类慢性病进行综合调理。</textarea>
+                    </div>
+                </div>
+
+                <div class="form-actions">
+                    <button class="btn-outline">取消</button>
+                    <button class="btn-primary">保存修改</button>
+                </div>
+            </div>
+            
+        </div>
+    </main>
+
+</body>
+</html>

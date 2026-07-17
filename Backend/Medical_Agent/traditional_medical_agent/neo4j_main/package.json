@@ -1,0 +1,14 @@
+{
+  "name": "neo4j-tcm-knowledge-graph-query",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Fixed query interfaces for the Neo4j TCM formula and herb knowledge graph.",
+  "main": "knowledge_graph_query.js",
+  "scripts": {
+    "health": "node knowledge_graph_query.js healthCheck",
+    "query:symptom": "node knowledge_graph_query.js"
+  },
+  "dependencies": {
+    "neo4j-driver": "^5.28.1"
+  }
+}

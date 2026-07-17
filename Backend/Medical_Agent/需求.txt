@@ -1,0 +1,204 @@
+基于知识图谱的中医药两级智能诊疗Agent项目——完整功能需求说明书
+一、项目整体概述
+本项目为中医院线上预问诊+线下接诊一体化系统，整体由**Uni-app微信小程序（患者端）+Vue3PC医生网页后台+FastAPI/Django后端+MySQL业务数据库+Neo4j中医药知识图谱+LangGraph两级分层AI诊疗Agent**构成。
+核心业务闭环
+患者小程序注册建档→AI预问诊采集症状→线上预约科室挂号→线下医生网页接诊→AI多轮引导完善三诊信息→依托知识图谱输出可溯源辨证+方剂建议→医生可查询药材、证型、医案→完整病历。
+两级Agent为医患两端统一底层引擎：
+1.患者端：完成AI预问诊、导诊分诊、基础药材科普；
+2.医生PC端：临床辅助问诊、逐步引导采集缺失症状、图谱溯源辨证、支持医生自定义知识库检索；
+3.所有辨证、药材、医案查询均由Agent直连neo4j数据库，分层规范。
+技术约束：
+-Agent架构：LangGraph两级调度（顶层Supervisor调度Agent + 问诊抽取/诊断+回复合并/自定义查询/医案检索/问候处理/无关内容处理/科室咨询共7个子节点），Supervisor单次LLM调用完成意图识别后路由到对应子节点；诊断+回复生成合并为单一节点（单次LLM调用内完成知识图谱查询→科室智能判断→自然语言回复生成），症状标准化在Supervisor/问诊抽取节点完成，诊断节点专注KG查询与回复生成；诊断Agent一次调用知识图谱获取证型+方剂+药材+科室结果，医案检索由独立子节点（medical_case）按需调用neo4j_case图谱完成；科室咨询由独立子节点（department_inquiry）基于已有症状由LLM推荐就诊科室；
+-大模型来源：阿里云DashScope API（通义千问系列）；当前所有节点统一使用qwen3.7-max模型（环境变量LLM_MODEL_32B配置），LLM_MODEL_13B=qwen-turbo已预留但未启用；
+-前端：患者Uni-app小程序、医生独立Vue3网页后台；
+-数据隔离：单院内病历独立存储。
+
+二、产品载体与角色权限划分
+2.1患者端载体：Uni-app编译微信小程序（仅手机端使用）
+面向普通就诊群众，可进行AI问诊，挂号、保存病历，必须实名注册建档。
+2.2医生端载体：独立Vue3PC网页后台（电脑浏览器访问）
+仅医师账号密码登录，具备挂号接诊、AI辅助辨证、电子病历管理、知识库检索、自建医案权限；无小程序医生端，电脑大屏适配病历表格。
+2.3底层共用资源
+同一套两级AI智能体、同一套Neo4j中医药知识图谱、同一MySQL业务数据库、统一后端API服务。
+
+三、微信小程序（患者端）完整功能需求
+3.1账号注册&标准化电子病历建档（核心新增）
+1.新用户微信授权登录后强制建档，生成全局唯一`patient_id`一人一档；
+2.建档表单（患者自主填写，永久基础档案）：
+-基础身份：姓名、性别、年龄、手机号；
+-健康档案：药物/中药材过敏史、既往慢病、家族病史、女性经期孕产信息；
+3.档案权限：患者可随时修改基础信息，**诊疗病历、医生开具处方仅只读，不可编辑**；
+4.病历分层存储：
+-基础永久档案（注册填写）；
+-挂号就诊后医生开具处方、完整门诊电子病历。
+
+3.2AI预问诊&导诊挂号模块（新增完整挂号流程）
+1.AI预问诊对话（复用两级Agent）
+-多轮采集主诉、症状、舌象、脉象（`mode=follow-up`锁定已有信息拓展咨询）；
+-Agent判断应在哪科挂号；
+-全程附带免责声明：仅线上预问诊参考，不可替代线下医师面诊；
+2.线上挂号业务流程
+1.预问诊结束一键跳转挂号页面，也支持自主选择科室、医生、就诊时段；
+2.展示科室列表、医生简介，提交生成挂号订单；
+3.个人中心查看、取消未就诊挂号订单，展示历史挂号记录。
+
+3.3知识库科普
+1.中药材模糊检索，查看性味归经、禁忌、功效；
+2.经典医案简化科普，剥离专业术语适配普通用户；
+
+3.4个人中心全功能
+1.基础健康档案修改；
+2.挂号订单；
+3.医生开具处方、完整门诊电子病历；
+
+四、Vue3PC医生网页后台（医生端）完整功能需求
+4.1挂号接诊队列首页
+1.首页展示当日所有已挂号患者列表，展示：姓名、年龄、性别、过敏药材、历史辨证、历史处方；
+2.支持按科室、挂号时间筛选；
+3.点击患者【接诊】，自动跳转工作台，右上侧边栏以**表格形式展示该患者基本信息**；
+
+
+4.2诊断模块
+4.2.1AI分步辅助诊疗（两级Agent支撑）
+1.多轮信息缺失引导
+Agent读取当前医生录入的所有患者症状、三诊数据，自动判断信息缺口，逐条给出下一步采集建议（如“缺少脉象信息，请补充；未确认有无自汗，影响风寒/风热区分”），逐步缩小辨证范围；
+2.可溯源辨证与方剂输出
+信息收集完整后，Agent调用Neo4j知识图谱（query_kg_for_symptoms），输出完整辨证结论、对应治法、推荐方剂、药材组成；图谱原始结果（`kg_raw_result`）含可用方剂/被过敏排除方剂/被排除原因等完整溯源信息，后端可结合业务需要落库做"有理有据"展示；
+3.手动自定义知识库查询
+医生在左侧ai聊天框底部输入框自由输入查询指令，例如：
+-“麻黄的功效、配伍禁忌、相似药材”
+-“风寒夹湿证经典医案”
+-“桂枝汤加减方案”
+输入后触发Agent单独检索Neo4j，直接返回结构化总结内容，不干扰当前问诊流程。
+
+4.2.2处方记录归档
+医生确认辨证方剂后，填写药材剂量、煎服法、服用周期，点击保存自动写入患者本次门诊电子病历，永久留存。
+
+4.3电子病历管理模块
+1.患者历史病历检索：通过姓名、patient_id、证型、就诊时间检索；
+2.单次门诊完整病历查看（表格化展示三诊、辨证、方剂）；
+
+4.4医案库管理
+1.医生自建临床医案上传，同步存入Neo4j关联对应证型实体；
+2.多医案对比，Agent自动总结用药、辨证差异；
+3.相似医案智能匹配。
+
+五、两级分层AI诊疗Agent（算法工程师）
+5.1整体架构
+LangGraph实现两级调度：顶层Supervisor调度Agent + 7个子节点（问诊抽取/诊断+回复合并/自定义查询/医案检索/问候处理/无关内容处理/科室咨询）。Supervisor单次LLM调用完成意图识别后路由到对应子节点，状态机内循环回流（supervisor ↔ extract_symptoms ↔ supervisor）以支持多轮追问。诊断+回复生成合并为单一节点（_diagnose_and_respond内部完成KG查询+科室智能判断+自然语言回复生成），最大化减少LLM调用次数、提升响应速度、降低成本。症状标准化（含口语→标准中医术语归一）在Supervisor（追问轮次）和extract_symptoms节点（诊断前补全）共同完成。知识图谱查询通过kg_service.py封装服务调用neo4j数据库，提供完整的实体关联信息（方剂-药材组成、证型-方剂关联、过敏冲突方案等）；医案检索由独立子节点（medical_case）调用neo4j_case图谱服务完成，与主知识图谱物理隔离。对接阿里云DashScope API，当前所有节点统一使用qwen3.7-max和qwen-turbo模型。所有回复（追问/诊断/药材查询/医案）均支持逐字流式输出（tcm_agent_stream_chat接口），前端可像DeepSeek一样逐字显示。
+
+5.2顶层Supervisor调度Agent核心能力
+1.三参数区分业务场景（原mode基础新增scene场景标识）
+-`scene="guide"`：患者小程序AI预问诊导诊场景；
+-`scene="doctor"`：医生PC端临床辅助诊疗场景；
+-`mode=normal`完整问诊流程/`mode=follow-up`锁定现有信息追加提问；
+对外统一函数：
+```python
+def tcm_agent_chat(session_id: str, patient_id: str, user_input: str, mode: str = "normal", scene: str = "guide", patient_profile: Optional[Dict[str, Any]] = None) -> Dict[str, Any]
+```
+新增`patient_id`和`patient_profile`参数，用于拉取患者过敏史、历史病历数据参与辨证校验。
+6.流式输出支持：除同步接口`tcm_agent_chat`外，提供`tcm_agent_stream_chat`流式接口，所有回复（追问/诊断/药材查询/医案）均逐字流式发送（SSE协议，每字符一个chunk，间隔10ms），前端可像DeepSeek一样逐字显示；诊断结果的结构化数据（diagnosis_result）在文本流式发送完毕后通过[METADATA]标记单独发送；流式接口签名：
+```python
+def tcm_agent_stream_chat(session_id: str, patient_id: str, user_input: str, mode: str = "normal", scene: str = "guide", patient_profile: Optional[Dict[str, Any]] = None) -> Generator[str, None, None]
+```
+2.Supervisor核心能力（单次LLM调用完成意图判断）
+-输入：当前用户输入 + 对话历史 + 当前State（symptoms_info等）；
+-输出意图分类（共9种）：
+  -`diagnosis`：症状完整（症状+舌象+脉象齐备）进入辨证；
+  -`ask`：症状不完整追问；
+  -`explain`：用户/医生追问原因或要求解释（如"为什么"、"为什么挂这个科"），基于已有信息给出解释；
+  -`custom_query`：医生手动查询中药/方剂知识（如"麻黄的功效"、"麻黄汤的配伍"）；
+  -`medical_case`：医生/患者想查询医案（如"类似医案"、"风寒夹湿证案例"）；
+  -`department_inquiry`：用户询问挂号建议/推荐科室（如"我应该挂什么科""挂什么号""看什么科"），基于已有症状由LLM推荐就诊科室；
+  -`greeting`：用户/医生发送问候语（"你好"、"您好"、"在吗"等），需友好回应并介绍系统功能；
+  -`irrelevant`：用户输入与中医药问诊完全无关的内容（天气、股票、娱乐等），需友好说明系统定位；
+  -`done`：当前对话已完成无需进一步处理；
+-除意图分类外，Supervisor同时输出三个布尔字段由LLM判断（取代硬编码关键词匹配）：
+  -`user_explicit_stop`：用户是否明确表示不想再补充信息、希望直接进行分析判断（如"直接判断""帮我分析""不方便提供""就以目前信息"等）；
+  -`user_refused`：用户是否委婉表示无法或不愿提供更多信息（如"不知道""没有细节""不会描述"等，但未明确要求结束）；
+  -`force_diagnosis`：是否应强制进入诊断流程（用户明确要求诊断或拒绝提供信息时）；
+-【追问原则】只追问缺失的关键信息（如缺舌象就问舌象、缺脉象就问脉象），不要重复已知信息；追问轮次限制：最多追问3次；用户明确拒绝提供缺失信息时（user_explicit_stop或user_refused为true），只要有已有症状就立即停止追问，基于现有信息给出初步建议，不再继续追问（无需累计2次拒绝）；
+-【话题切换识别】即使之前对话已有症状信息，若当前输入明显是中药/方剂/医案查询（关键词命中"有什么功效""配伍""医案"等），优先识别为custom_query或medical_case，不被历史症状上下文误导。
+3.患者过敏史逻辑
+-接收后端传入`patient_profile.allergy_history.herbs`，诊断Agent自动规避过敏药材；
+-知识图谱层预过滤过敏方剂（safe_formulas vs unsafe_formulas），回复层显式提示"患者对XX过敏"信息；
+-若所有可用方剂均含过敏药材，则在诊断结果中标记"无最佳匹配方剂"，并列出被过敏排除的可考虑方剂作为参考。
+4.会话隔离：`session_id`区分单次对话，`patient_id`绑定患者全量档案；Agent内部以`_SESSIONS`字典维护session状态（含symptoms_info/diagnosis_result/kg_raw_result/messages/ask_round/refuse_count/force_diagnosis等），`MemorySaver` checkpointer双保险；
+5.异常兜底：捕获大模型超时、图谱查询无结果、参数缺失、JSON解析错误等异常，返回`status="error"` + 友好提示文本；诊断LLM JSON解析失败时自动fallback到正则提取`{department, response}`字段；
+6.Session生命周期：Agent内部session状态驻留内存`_SESSIONS`字典（含last_access_time），由后台守护线程定期清理（默认1小时无活动过期、10分钟扫描一次）；`MemorySaver` checkpointer用于LangGraph内部状态持久化。建议生产环境后端用Redis持久化以应对Agent重启；问诊结束后端可主动调用`del tcm_agent._SESSIONS[session_id]`释放。
+
+5.3子Agent分工
+子Agent1：问诊抽取Agent
+1.单次LLM调用完成：症状提取 + 标准化归一（口语→标准中医术语，例如"发寒"→"恶寒"、"没汗"→"无汗"、"腰酸"→"腰痛"等）+ 舌象脉象识别；
+2.标准化规则维护在LLM提示词中（SYMPTOM_NORMALIZATION_PROMPT），包括常用口语-标准术语映射表；
+3.提取主诉（chief_complaint）、判断is_complete（症状+舌象+脉象都齐则为True）、缺失信息描述；
+4.`follow-up`追加提问模式：保留session中已收集的symptoms_info，仅对当轮新输入做增量提取合并，避免重复追问已知信息；
+5.输出结构化SymptomsInfo：symptoms(标准化后)、tongue、pulse、chief_complaint、is_complete、missing_info、user_refused（用户是否明确表示无法/不愿继续提供信息，如"不会测""没有了""直接分析吧"等）。
+
+子Agent2：诊断+回复合并Agent（核心节点）
+1.单次LLM调用完成：调用知识图谱 + 智能判断科室 + 生成自然语言回复；
+2.知识图谱查询：
+-调用`query_kg_for_symptoms(symptoms, allergy_herbs)`获取完整结果（症状并发查询，max_workers=3线程池加速）；
+-返回字段：证型、方剂（含可用safe_formulas/被过敏过滤unsafe_formulas/被排除contraindicated_formulas三组）、药材列表、医案、警告信息；
+-对原始方剂中的药材名通过`_clean_herb_name_batch`调用LLM做批量清洗（去剂量、去加工说明，如"麻黄三两去节"→"麻黄"）；
+3.科室智能判断：
+-由大模型基于症状+证型+主治综合判断（参考常见中医科室：呼吸内科、消化内科、心血管内科、神经内科、妇科、儿科、骨伤科、皮肤科、针灸推拿科、治未病科、内分泌科、肾病科、泌尿外科等）；
+-在诊断LLM调用中以结构化输出`{department, response}`一并生成，不单独调用图谱；
+4.方剂处理：
+-并发查询每个症状（`call_kg_service`）再合并组合症状查询结果，去重后按"匹配症状数"降序排序；
+-读取患者过敏史，自动过滤、高亮过敏药材（`safe_formulas` vs `unsafe_formulas`）；
+-若所有可用方剂均含过敏药材，则返回"无最佳匹配方剂"；
+5.医案检索：本节点不直接检索医案，医案检索统一由子Agent4（medical_case）按需调用`search_medical_cases_by_clinical_options`接口完成（基于诊断结果syndrome/prescription/ingredients召回相似医案），实现主图谱与医案图谱职责分离；
+6.回复生成（最重要！）：
+-调用大模型（结构化输出`{department, response}`），整合知识图谱结果生成自然语言回复；
+-患者场景（guide）：温和亲切语气，像朋友间交流，诊断回复避免报告式Markdown排版（禁用###/**等），自然分段落，饮食建议必须使用"避免""不要""少吃"等明确否定词，自动给出就诊科室建议；医案检索结果使用Markdown格式返回（###标题/**加粗列表/[链接](url)/---分隔线）以便前端渲染；
+-医生场景（doctor）：专业但温和语气，像有经验的同事当面讨论病例，避免Markdown排版；
+-【关键约束】当方剂为"无最佳匹配方剂"或"未找到方剂"时：
+   a. 明确告诉医生"知识图谱未找到合适的方剂"；
+   b. 列出"知识图谱中可考虑的治疗方案（被患者过敏排除）"作为参考（基于`filtered_by_allergy`列表）；
+   c. 建议医生"基于自身临床经验谨慎选择其他方剂"；
+   d. 绝对不要自行编造或推荐"麻黄汤"、"桂枝汤"等未在知识图谱中出现的方剂；
+   e. 安全第一：患者过敏的药材绝对不能出现在推荐方剂中；
+-【容错】诊断LLM JSON解析失败时，自动fallback到正则提取`{department, response}`字段；二次失败时，使用KG结果+兜底模板拼接最终回复。
+
+子Agent3：自定义查询Agent
+1.接收医生/患者手动知识库检索指令，由Supervisor识别`custom_query`意图后路由；
+2.调用`_extract_query_target`通过LLM提取查询目标（keywords + query_type：herb/formula/syndrome/symptom/unknown），按目标类型分派：
+  -`herb`：调用`get_herb_detail(name)`查询单味中药详情（功效/主治/性味/归经/禁忌/配伍/相关方剂），无结果时提示换查询词；
+  -`formula`：调用`get_formula_detail(name)`查询方剂详情（组成/功效/主治/用法/禁忌），无结果时提示换查询词；
+  -`syndrome`：调用`search_formulas_by_effect(effect)`按功效关键词检索相关方剂；
+  -`symptom`/`unknown`：调用`recommend_clinical_options(description, limit=3)`综合推荐接口，按症状召回候选方剂和相关中药；
+  -以上接口全部失败时回退到`custom_query_kg`通用查询；
+3.查询结果由LLM整理为结构化Markdown（中药：功效/主治/用法/性味/归经/禁忌；方剂：组成/功效/主治/方义/用法/禁忌），无结果时给出查询词建议清单；
+4.不污染症状State、不干扰当前问诊流程。
+
+子Agent4：医案检索Agent
+1.由Supervisor识别`medical_case`意图后路由；
+2.数据源：独立neo4j_case医案知识图谱（与neo4j_main物理隔离，专门存储医案-医生-患者-处方关联），通过`call_case_kg_service`封装Node.js子进程调用，支持action：searchCases/searchByFormula/searchBySyndrome/searchByDisease/recommendClinicalOptions/getCaseDetail/addCase等；
+3.支持按方剂、症状、证型、病名、医生等维度检索相关医案；
+4.优先使用诊断结果（syndrome/prescription/ingredients[:3]）调用`search_medical_cases_by_clinical_options`召回Top5相似医案，无诊断结果时按用户输入关键词走`search_medical_cases`通用检索（auto模式下启发式识别query_type：方剂后缀→formula、含"炎/癌/瘤"→disease、含"虚/实/寒/热/湿"→syndrome、否则symptom）；
+5.自动汇总"基于相关医案汇总的推荐方剂"（含支持医案数、组成、证据案例），返回Markdown格式结构化文本：###第N个：标题/完整摘要（不截断，超500字在句号处截断）/- **字段：**列表（医家/病名/证型/处方/治法/症状）/**来源：**[点击查看原文](url)可点击链接/**ID：**案例ID/---分隔线；
+6.提供`add_case`接口支持医生自建临床医案上传，自动建立与病名/证型/症状/方剂/治法/名医/栏目的关联关系。
+
+子Agent5：问候处理Agent
+1.由Supervisor识别`greeting`意图后路由；
+2.无LLM调用，直接返回固定模板（患者/医生两套话术）："您好！我是中医药智能问诊助手..."，介绍系统功能（症状分析/辨证论治/方剂查询）、引导用户提供症状信息；
+3.不污染症状State、不打断诊断流程。
+
+子Agent6：无关内容处理Agent
+1.由Supervisor识别`irrelevant`意图后路由；
+2.单次LLM调用，基于大模型自身知识友好回应无关问题，同时提示系统定位（中医药智能问诊/辨证论治/方剂医案查询），并尝试引导回健康话题；
+3.不污染症状State、不打断诊断流程。
+
+子Agent7：科室咨询Agent
+1.由Supervisor识别`department_inquiry`意图后路由（用户询问"我应该挂什么科""挂什么号""看什么科"等）；
+2.单次LLM调用，基于已有症状信息（symptoms_info中的症状/舌象/脉象）推荐1-3个合适的就诊科室及简短理由；
+3.患者场景（guide）：语气亲切温暖，直接回答科室推荐，不分析病情；
+4.医生场景（doctor）：专业简洁；
+5.若没有已收集的症状信息，提示用户先提供症状；
+6.由LLM理解用户真实意图识别（非硬编码关键词匹配），即使用户同时说了"不方便提供"等信息，只要包含挂号/科室咨询就优先路由到本节点；
+7.不污染症状State、不打断诊断流程。
+
+六、项目核心业务流程
+1.患者流程：微信注册建档→AI预问诊采集症状→推荐科室/线上挂号→线下就诊；
+2.医生流程：网页登录→接诊队列调取患者病历→医生与智能体对话录入三诊信息→AI逐步提示缺失症状→信息充足自动诊断（一次图谱查询获取证型+方剂+药材+科室，医案按需由独立子节点检索）→手动查询（中药/方剂/医案）→确认方剂保存至患者电子病历→创建个人典型医案库。

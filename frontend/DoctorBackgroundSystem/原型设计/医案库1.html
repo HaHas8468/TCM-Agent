@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>本草问方 - 个人医案库</title>
+    <style>
+        /* --- 核心变量 (保持全局一致) --- */
+        :root {
+            --primary-color: #2D6A4F; 
+            --primary-dark: #1B4332;
+            --primary-light: #E8F5E9;
+            --bg-color: #F4F7F5; 
+            --text-main: #2C3E35;
+            --text-sub: #677A71;
+            --white: #FFFFFF;
+            --border-color: #E0EAE4;
+            --radius-md: 10px;
+            --radius-lg: 16px;
+            --shadow-sm: 0 4px 12px rgba(45, 106, 79, 0.04);
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+        body { background-color: var(--bg-color); color: var(--text-main); display: flex; height: 100vh; overflow: hidden; }
+
+        /* --- 侧边栏 (保持一致) --- */
+        .sidebar { width: 260px; background-color: var(--white); border-right: 1px solid var(--border-color); display: flex; flex-direction: column; padding: 24px 16px; }
+        .brand { font-size: 20px; font-weight: 700; color: var(--primary-dark); letter-spacing: 2px; margin-bottom: 24px; padding: 0 8px; }
+        .doctor-card { background: linear-gradient(135deg, var(--primary-color), var(--primary-dark)); color: var(--white); border-radius: var(--radius-lg); padding: 20px; margin-bottom: 24px; }
+        .doc-name { font-size: 18px; font-weight: 600; margin-bottom: 4px; }
+        .doc-title { font-size: 12px; opacity: 0.8; }
+        
+        .nav-menu { list-style: none; flex: 1; }
+        .nav-item { padding: 12px 16px; margin-bottom: 8px; border-radius: var(--radius-md); color: var(--text-sub); font-size: 14px; cursor: pointer; transition: 0.2s; }
+        .nav-item:hover { background-color: #F0F5F2; }
+        .nav-item.active { background-color: var(--primary-light); color: var(--primary-color); font-weight: 600; border: 1px solid var(--primary-color); }
+
+        /* --- 主内容区 --- */
+        .main-content { flex: 1; padding: 32px 40px; overflow-y: auto; }
+        .header-box { display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 24px; }
+        .page-title { font-size: 24px; color: var(--primary-dark); font-weight: 600; }
+        .page-tips { font-size: 13px; color: var(--text-sub); margin-top: 4px; }
+
+        /* --- 录入表单卡片 --- */
+        .case-card {
+            background: var(--white);
+            border-radius: var(--radius-lg);
+            padding: 32px;
+            box-shadow: var(--shadow-sm);
+            border: 1px solid var(--border-color);
+            max-width: 1000px;
+        }
+
+        .section-group { margin-bottom: 32px; }
+        .section-header { 
+            display: flex; align-items: center; gap: 8px;
+            font-size: 16px; font-weight: 600; color: var(--primary-color);
+            margin-bottom: 20px; padding-left: 4px; border-left: 4px solid var(--primary-color);
+        }
+
+        /* 表单网格布局 */
+        .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+        .form-group { display: flex; flex-direction: column; gap: 8px; }
+        .full-width { grid-column: span 2; }
+
+        .form-label { font-size: 13px; color: var(--text-main); font-weight: 600; }
+        .form-label span { color: #D32F2F; margin-left: 4px; }
+        .form-label em { font-style: normal; font-weight: 400; color: var(--text-sub); margin-left: 8px; }
+
+        .form-control {
+            padding: 12px 14px;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            font-size: 14px;
+            outline: none;
+            transition: all 0.2s;
+            background-color: #FAFCFB;
+        }
+        .form-control:focus { border-color: var(--primary-color); background-color: var(--white); box-shadow: 0 0 0 3px rgba(45,106,79,0.08); }
+        
+        textarea.form-control { resize: vertical; min-height: 80px; line-height: 1.6; }
+        .原文-area { min-height: 160px; }
+
+        /* 关联实体（知识标签区）专用样式 */
+        .entity-box {
+            background-color: #F8FAFB;
+            padding: 20px;
+            border-radius: 12px;
+            border: 1px solid #E9F0ED;
+        }
+        .entity-control { background-color: var(--white); border-color: #D1DCD6; }
+
+        /* 按钮区 */
+        .form-actions {
+            display: flex; gap: 16px; margin-top: 40px; 
+            padding-top: 24px; border-top: 1px solid #F0F5F2;
+        }
+        .btn {
+            padding: 12px 28px; border-radius: 8px; font-size: 15px; font-weight: 600;
+            cursor: pointer; transition: all 0.2s; border: none;
+        }
+        .btn-submit { background-color: var(--primary-color); color: var(--white); box-shadow: 0 4px 12px rgba(45, 106, 79, 0.2); }
+        .btn-submit:hover { background-color: var(--primary-dark); transform: translateY(-1px); }
+        .btn-clear { background-color: var(--white); color: var(--text-sub); border: 1px solid var(--border-color); }
+        .btn-clear:hover { background-color: #F9FAFB; color: var(--text-main); }
+
+    </style>
+</head>
+<body>
+
+    <aside class="sidebar">
+        <div class="brand">本草问方</div>
+        <div class="doctor-card">
+            <div class="doc-name">陈桂林</div>
+            <div class="doc-title">中医内科 · 主任医师</div>
+        </div>
+        <ul class="nav-menu">
+            <li class="nav-item">接诊队列</li>
+            <li class="nav-item">问诊工作台</li>
+            <li class="nav-item">病历管理</li>
+            <li class="nav-item active">个人医案库</li>
+            <li class="nav-item">用户设置</li>
+        </ul>
+    </aside>
+
+    <main class="main-content">
+        <div class="header-box">
+            <div>
+                <h1 class="page-title">医案录入</h1>
+                <p class="page-tips">单条医案写入 Neo4j 知识图谱 · 标签字段可用逗号/顿号分隔多个值</p>
+            </div>
+        </div>
+
+        <div class="case-card">
+            <form id="caseForm">
+                
+                <div class="section-group">
+                    <div class="section-header">基础信息</div>
+                    <div class="form-grid">
+                        <div class="form-group full-width">
+                            <label class="form-label">医案标题<span>*</span></label>
+                            <input type="text" class="form-control" placeholder="如：张氏治眩晕验案">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">作者<em>录入人 / 原作者</em></label>
+                            <input type="text" class="form-control" placeholder="请输入作者">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">发布日期</label>
+                            <input type="date" class="form-control" value="2026-07-13">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">栏目<em>分类标签</em></label>
+                            <input type="text" class="form-control" placeholder="如：内科验案">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">来源链接</label>
+                            <input type="text" class="form-control" placeholder="https://...">
+                        </div>
+                    </div>
+                </div>
+
+                <div class="section-group">
+                    <div class="section-header">内容详述</div>
+                    <div class="form-group full-width" style="margin-bottom: 20px;">
+                        <label class="form-label">摘要<em>辨证思路 / 疗效概述</em></label>
+                        <textarea class="form-control" placeholder="简要概括本案辨证与治法..."></textarea>
+                    </div>
+                    <div class="form-group full-width">
+                        <label class="form-label">原文<em>医案全文内容</em></label>
+                        <textarea class="form-control 原文-area" placeholder="患者某某，男，岁......"></textarea>
+                    </div>
+                </div>
+
+                <div class="section-group">
+                    <div class="section-header">关联实体 (知识标签)</div>
+                    <div class="entity-box">
+                        <div class="form-grid">
+                            <div class="form-group">
+                                <label class="form-label">病名</label>
+                                <input type="text" class="form-control entity-control" placeholder="如：高血压, 眩晕">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">证型</label>
+                                <input type="text" class="form-control entity-control" placeholder="如：肝阳上亢, 痰湿中阻">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">症状</label>
+                                <input type="text" class="form-control entity-control" placeholder="如：头痛, 失眠">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">方剂</label>
+                                <input type="text" class="form-control entity-control" placeholder="如：天麻钩藤饮">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">治法</label>
+                                <input type="text" class="form-control entity-control" placeholder="如：平肝潜阳">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">名医</label>
+                                <input type="text" class="form-control entity-control" placeholder="如：张仲景">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="form-actions">
+                    <button type="submit" class="btn btn-submit">提交医案</button>
+                    <button type="reset" class="btn btn-clear">清空</button>
+                </div>
+
+            </form>
+        </div>
+    </main>
+
+</body>
+</html>

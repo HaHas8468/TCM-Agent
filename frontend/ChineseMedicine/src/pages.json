@@ -1,0 +1,113 @@
+{
+	"pages": [ //pages数组中第一项表示应用启动页，参考：https://uniapp.dcloud.io/collocation/pages
+		{
+			"path": "pages/index/index",
+			"style": {
+				"navigationStyle": "custom",
+				"disableScroll": true,
+				"backgroundColor": "#F7F5EF"
+			}
+		},
+		{
+			"path": "pages/login/login",
+			"style": {
+				"navigationStyle": "custom",
+				"backgroundColor": "#F7F5EF"
+			}
+		},
+		{
+			"path": "pages/login/register",
+			"style": {
+				"navigationStyle": "custom",
+				"backgroundColor": "#F7F5EF"
+			}
+		},
+		{
+			"path": "pages/login/forgot",
+			"style": {
+				"navigationStyle": "custom",
+				"backgroundColor": "#F7F5EF"
+			}
+		},
+		{
+			"path": "pages/main/main",
+			"style": {
+				"navigationStyle": "custom",
+				"backgroundColor": "#F7F5EF"
+			}
+		},
+		{
+			"path": "pages/register/index",
+			"style": {
+				"navigationStyle": "custom",
+				"backgroundColor": "#F7F5EF"
+			}
+		},
+		{
+			"path": "pages/register/smart",
+			"style": {
+				"navigationStyle": "custom",
+				"backgroundColor": "#F7F5EF"
+			}
+		},
+		{
+			"path": "pages/register/direct",
+			"style": {
+				"navigationStyle": "custom",
+				"backgroundColor": "#F7F5EF"
+			}
+		},
+		{
+			"path": "pages/info/index",
+			"style": {
+				"navigationStyle": "custom",
+				"backgroundColor": "#F7F5EF"
+			}
+		},
+		{
+			"path": "pages/user/user",
+			"style": {
+				"navigationStyle": "custom",
+				"backgroundColor": "#F7F5EF"
+			}
+		},
+		{
+			"path": "pages/user/setting",
+			"style": {
+				"navigationStyle": "custom",
+				"backgroundColor": "#F7F5EF"
+			}
+		},
+		{
+			"path": "pages/user/profile",
+			"style": {
+				"navigationStyle": "custom",
+				"backgroundColor": "#F7F5EF"
+			}
+		},
+		{
+			"path": "pages/user/history",
+			"style": {
+				"navigationStyle": "custom",
+				"backgroundColor": "#F7F5EF",
+				"enablePullDownRefresh": true,
+				"backgroundTextStyle": "dark"
+			}
+		},
+		{
+			"path": "pages/user/history-detail",
+			"style": {
+				"navigationStyle": "custom",
+				"backgroundColor": "#F7F5EF"
+			}
+		}
+	],
+	"globalStyle": {
+		"navigationBarTextStyle": "black",
+		"navigationBarTitleText": "本草问方",
+		"navigationBarBackgroundColor": "#F7F5EF",
+		"backgroundColor": "#F7F5EF",
+		"navigationStyle": "custom"
+	},
+	"uniIdRouter": {}
+}

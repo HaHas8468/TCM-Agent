@@ -1,0 +1,25 @@
+# Dependencies and local environments
+node_modules/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# Build artifacts and IDE files
+dist/
+build/
+unpackage/
+.hbuilderx/
+.idea/
+.codex/
+.workbuddy/
+.playwright-mcp/
+.DS_Store
+*.log
+
+# Local configuration and archives
+.env
+.env.*
+*.zip
+*_token.txt
+*_pid.txt

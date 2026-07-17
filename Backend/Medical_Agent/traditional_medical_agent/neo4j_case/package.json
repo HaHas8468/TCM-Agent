@@ -1,0 +1,10 @@
+{
+  "name": "kg-tcm-agent-queries",
+  "version": "1.0.0",
+  "private": true,
+  "type": "commonjs",
+  "description": "Fixed Neo4j query interfaces for TCM knowledge graph agents.",
+  "dependencies": {
+    "neo4j-driver": "^5.28.1"
+  }
+}
