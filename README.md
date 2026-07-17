@@ -55,6 +55,17 @@ cd frontend/DoctorBackgroundSystem && npm install && npm run dev
 
 两套开发服务器均通过 `/api` 代理访问后端；如后端不在本机，可设置 `VITE_DEV_PROXY_TARGET`。小程序等非 H5 端使用 `VITE_API_BASE_URL` 配置完整后端地址。
 
+### 3. Docker 一键演示（不配置域名）
+
+填写根目录 `.env` 中的数据库、Neo4j、Agent 与模型密钥后，可直接启动全部服务：
+
+```bash
+docker compose up --build -d
+docker compose ps
+```
+
+患者端访问 `http://服务器IP:8080/`，医生端访问 `http://服务器IP:3000/`。两端均通过同源 `/api` 访问后端，不需要单独设置前端 API 地址。该入口用于本机或局域网演示；公网正式使用请继续使用 HTTPS 部署流程。
+
 ## 文档
 
 所有项目文档统一放在 [docs/](docs/README.md)：

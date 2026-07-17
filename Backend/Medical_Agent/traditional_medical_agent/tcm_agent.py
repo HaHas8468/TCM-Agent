@@ -293,8 +293,8 @@ def _supervisor_decide(scene: str, mode: str, user_input: str, symptoms_info: Op
 【可用意图】
 - diagnosis: 症状信息已足够（包含症状+舌象+脉象），进行完整诊断
 - explain: 用户追问原因或要求解释（如"为什么"、"为什么挂神经内科"），基于已有信息给出解释
-- ask: 症状信息不完整，需要追问用户补充信息
-- custom_query: 用户主动查询中药/方剂知识（如"麻黄的功效"）
+- ask: 症状信息不完整，需要追问用户补充信息；仅当用户在描述自身病情且信息不全时使用
+- custom_query: 用户主动查询中医药知识（如"麻黄的功效"、"舌象脉象怎么测"、"什么是脾胃虚弱"、"桂枝汤的配伍"）。知识概念、观察方法和药材功效问题应识别为 custom_query，而非 ask
 - medical_case: 用户想查看医案
 - department_inquiry: 用户询问挂号建议、推荐科室（如"我应该挂什么科""挂什么号""看什么科""应该挂哪个科室"），需要基于已有症状推荐合适的就诊科室
 - greeting: 用户发送问候语（如"你好"、"您好"、"在吗"），需要友好回应并介绍系统功能
@@ -429,8 +429,8 @@ def _supervisor_decide(scene: str, mode: str, user_input: str, symptoms_info: Op
 【可用意图】
 - diagnosis: 医生提供了患者症状信息（包含症状+舌象+脉象），进行辨证
 - explain: 医生追问原因或要求解释（如"为什么"、"为什么推荐这个方剂"），基于已有信息给出解释
-- ask: 医生未提供足够信息，追问（如缺少舌象或脉象）
-- custom_query: 医生想查询中药/方剂知识（如"麻黄的功效"、"麻黄汤的配伍"）
+- ask: 医生未提供足够信息，追问（如缺少舌象或脉象）；仅当医生在描述患者病情且信息不全时使用
+- custom_query: 医生想查询中医药知识（如"麻黄的功效"、"麻黄汤的配伍"、"舌象脉象怎么测"、"什么是脾胃虚弱"）。知识概念、观察方法和药材功效问题应识别为 custom_query，而非 ask
 - medical_case: 医生想查询医案
 - department_inquiry: 医生询问推荐科室（如"患者应该挂什么科""看什么科"），基于已有症状推荐科室
 - greeting: 医生发送问候语（如"你好"、"您好"），需要友好回应并介绍系统功能
@@ -914,6 +914,12 @@ def supervisor_node(state: AgentState) -> AgentState:
             )
             logger.info("agent_symptoms_merged symptom_count=%s has_tongue=%s has_pulse=%s", len(merged_symptoms), bool(merged_tongue), bool(merged_pulse))
 
+            # 本轮已补全症状、舌象和脉象时立即诊断，避免又返回一次补充问题。
+            if is_complete:
+                intent = "diagnosis"
+                force_diagnosis = True
+                logger.info("agent_supervisor_force_diagnosis_after_complete_merge")
+
             # 如果用户已明确拒绝提供舌象脉象，且有症状，直接强制诊断
             if merged_symptoms and (decision.user_explicit_stop or decision.user_refused or merged_refused):
                 logger.info("agent_supervisor_force_diagnosis_after_merge")
@@ -956,6 +962,12 @@ def supervisor_node(state: AgentState) -> AgentState:
             # 首次提取
             updated_symptoms_info = new_si
             logger.info("agent_symptoms_extracted symptom_count=%s has_tongue=%s has_pulse=%s", len(new_si.symptoms), bool(new_si.tongue), bool(new_si.pulse))
+
+            # 首次输入已具备完整四诊信息时，直接进入诊断。
+            if new_si.is_complete:
+                intent = "diagnosis"
+                force_diagnosis = True
+                logger.info("agent_supervisor_force_diagnosis_after_complete_initial")
 
             # 首次提取时，如果用户已明确拒绝提供舌象脉象，且有症状，直接强制诊断
             symptoms_str = "、".join(new_si.symptoms[:5]) if new_si.symptoms else ""

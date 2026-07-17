@@ -37,3 +37,53 @@ server {
         try_files $uri $uri/ /index.html;
     }
 }
+
+# 免域名的一键演示入口：患者端与 API 同源，避免浏览器 CORS 配置。
+server {
+    listen 8080;
+    server_name _;
+    client_max_body_size 128k;
+
+    location ^~ /api/ {
+        proxy_pass http://gateway:8000;
+        proxy_http_version 1.1;
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 120s;
+        proxy_set_header Host $host;
+        proxy_set_header X-Request-ID $request_id;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location / {
+        root /usr/share/nginx/html/patient;
+        try_files $uri $uri/ /index.html;
+    }
+}
+
+# 医生端独立端口，同样将 /api 转发给内部网关。
+server {
+    listen 3000;
+    server_name _;
+    client_max_body_size 128k;
+
+    location ^~ /api/ {
+        proxy_pass http://gateway:8000;
+        proxy_http_version 1.1;
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 120s;
+        proxy_set_header Host $host;
+        proxy_set_header X-Request-ID $request_id;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location / {
+        root /usr/share/nginx/html/doctor;
+        try_files $uri $uri/ /index.html;
+    }
+}

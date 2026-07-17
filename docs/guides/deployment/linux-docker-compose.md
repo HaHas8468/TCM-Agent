@@ -10,6 +10,8 @@
 | `https://<APP_DOMAIN>/doctor/` | 医生端 |
 | `https://<APP_DOMAIN>/api/` | 统一业务 API |
 | `https://<APP_DOMAIN>/healthz` | 边缘健康检查 |
+| `http://服务器IP:8080/` | 患者端 Docker 演示入口 |
+| `http://服务器IP:3000/` | 医生端 Docker 演示入口 |
 
 ## 前置条件
 
@@ -49,6 +51,17 @@ chmod 600 .env
 ```
 
 部署脚本先启动 HTTP 验证站点，使用共享 webroot 申请证书，然后自动切换为 HTTPS。若申请失败，检查 DNS 是否已生效、80 端口是否可从公网访问，以及 `./scripts/logs.sh edge` 的输出；不要把数据库密码或模型密钥贴到日志和工单中。
+
+## 免域名 Docker 演示
+
+本机或局域网测试不需要证书。完成 `.env` 的数据库、Neo4j、Agent 和模型配置后，直接执行：
+
+```bash
+docker compose up --build -d
+docker compose ps
+```
+
+访问 `http://服务器IP:8080/` 打开患者端，访问 `http://服务器IP:3000/` 打开医生端。两个端口的 Nginx 都会将同源 `/api` 反向代理至内部网关，因此前端无需另配 API 地址。该方式不提供公网 HTTPS，正式对外使用仍应执行上一节的 `./scripts/deploy.sh`。
 
 ## 日常运维
 
