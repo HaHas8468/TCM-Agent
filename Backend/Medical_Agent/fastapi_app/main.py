@@ -1328,6 +1328,8 @@ async def agent_chat(input_data: AgentInput, token_info: Dict[str, Any] = Depend
             response_data["diagnosis"] = raw["diagnosis_result"]
         elif raw.get("status") == "asking":
             response_data["ask_round"] = raw.get("ask_round", 1)
+        if isinstance(raw.get("trace"), dict):
+            response_data["trace"] = raw["trace"]
         
         return {"code": 0, "data": response_data}
     except HTTPException:

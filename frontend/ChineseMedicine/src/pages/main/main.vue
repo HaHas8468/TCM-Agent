@@ -10,7 +10,7 @@
 					<text class="hero-card__date-text">{{ dateLabel }}</text>
 				</view>
 				<view class="hero-card__profile-button" aria-label="个人中心" @tap="goUser">
-					<image class="hero-card__profile-image" :src="userProfile.avatar" mode="aspectFill"></image>
+					<image class="hero-card__profile-icon" src="/static/design-assets/icons/lucide/menu.svg" mode="aspectFit"></image>
 				</view>
 			</view>
 
@@ -449,11 +449,10 @@
 		overflow: hidden;
 	}
 
-	.hero-card__profile-image {
+	.hero-card__profile-icon {
 		display: block;
-		width: 100%;
-		height: 100%;
-		border-radius: 16rpx;
+		width: 28rpx;
+		height: 28rpx;
 	}
 
 	.hero-card__main {
