@@ -837,11 +837,19 @@ async def get_doctor_queue(authorization: str = Header(None), date: str = None, 
     orders_query = db.query(ApiOrder).filter(ApiOrder.doctor_id == doctor.id, ApiOrder.date == target_date)
     if department:
         orders_query = orders_query.filter(ApiOrder.department == department)
-    if period in {"morning", "afternoon"}:
+    # 前端接口使用 morning/afternoon，历史及初始化排班数据则使用“上午/下午”。
+    # 同时兼容两种写法，避免时段筛选因存储值与接口值不一致而返回空队列。
+    period_values = {
+        "morning": ("morning", "上午"),
+        "上午": ("morning", "上午"),
+        "afternoon": ("afternoon", "下午"),
+        "下午": ("afternoon", "下午"),
+    }.get(period)
+    if period_values:
         schedules = db.query(ApiSchedule.id).filter(
             ApiSchedule.doctor_id == doctor.id,
             ApiSchedule.date == target_date,
-            ApiSchedule.morning_afternoon == period,
+            ApiSchedule.morning_afternoon.in_(period_values),
         )
         orders_query = orders_query.filter(ApiOrder.schedule_id.in_(schedules))
     orders = orders_query.order_by(ApiOrder.time.asc()).all()
