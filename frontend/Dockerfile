@@ -22,6 +22,13 @@ FROM nginx:1.27-alpine
 
 COPY frontend/nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=patient-build /build/dist/build/h5/ /usr/share/nginx/html/patient/
+# uni-app H5 使用绝对路径 /static/... 引用图片与图标；显式复制以规避 NAS 构建环境遗漏静态目录。
+COPY frontend/ChineseMedicine/src/static/ /tmp/patient-static/
 COPY --from=doctor-build /build/dist/ /usr/share/nginx/html/doctor/
+RUN mkdir -p /usr/share/nginx/html/patient/static \
+    && cp -a /tmp/patient-static/. /usr/share/nginx/html/patient/static/ \
+    && chmod -R a+rX /usr/share/nginx/html/patient/static \
+    && test -f /usr/share/nginx/html/patient/static/logo.png \
+    && test -f /usr/share/nginx/html/patient/static/img/people.svg
 
 EXPOSE 8080 3000

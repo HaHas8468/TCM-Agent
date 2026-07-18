@@ -12,5 +12,12 @@ FROM nginx:1.27-alpine
 
 COPY frontend/ChineseMedicine/nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=build /build/dist/build/h5/ /usr/share/nginx/html/
+# H5 页面以 /static/... 访问资源，部署镜像中显式保留该目录。
+COPY frontend/ChineseMedicine/src/static/ /tmp/patient-static/
+RUN mkdir -p /usr/share/nginx/html/static \
+    && cp -a /tmp/patient-static/. /usr/share/nginx/html/static/ \
+    && chmod -R a+rX /usr/share/nginx/html/static \
+    && test -f /usr/share/nginx/html/static/logo.png \
+    && test -f /usr/share/nginx/html/static/img/people.svg
 
 EXPOSE 8080
