@@ -41,7 +41,7 @@ from .rate_limit import (
     limit_login,
     rate_limit_error_response,
 )
-from traditional_medical_agent.kg_service import search_by_doctor
+from traditional_medical_agent.kg_service import add_case, search_by_doctor
 
 
 load_dotenv()
@@ -1422,9 +1422,40 @@ async def agent_chat_stream(input_data: AgentInput, token_info: Dict[str, Any] =
 
 
 @app.post("/api/knowledge/case")
-async def add_case_api(_: AddCaseInput, __: Dict[str, Any] = Depends(limit_authenticated_write)):
-    """图谱写入尚未具备独立管理员审核流，首期默认关闭。"""
-    raise HTTPException(status_code=403, detail="医案写入功能暂未开放")
+async def add_case_api(input_data: AddCaseInput, token_info: Dict[str, Any] = Depends(limit_authenticated_write)):
+    """由当前登录医生创建医案，并写入独立的 case_neo4j 图谱。"""
+    require_role(token_info, "doctor")
+    db = next(get_db())
+    doctor = current_doctor(db, token_info)
+
+    result = add_case(
+        title=input_data.title,
+        summary=input_data.summary,
+        raw_text=input_data.rawText,
+        source_url=input_data.sourceUrl,
+        publish_date=input_data.publishDate,
+        # 录入人和关联医生必须由认证上下文决定，不能信任前端传值。
+        author=doctor.name,
+        channel=input_data.channel,
+        diseases=_case_entities_to_kg(input_data.diseases),
+        syndromes=_case_entities_to_kg(input_data.syndromes),
+        symptoms=_case_entities_to_kg(input_data.symptoms),
+        formulas=_case_entities_to_kg(input_data.formulas),
+        treatment_methods=_case_entities_to_kg(input_data.treatmentMethods),
+        doctors=[{"name": doctor.name, "id": doctor.doctor_id}],
+    )
+    if not result.get("success"):
+        logger.warning("case_write_failed doctor_id=%s", doctor.doctor_id)
+        raise HTTPException(status_code=502, detail="医案写入失败，请稍后重试")
+
+    return {
+        "code": 0,
+        "data": {
+            "caseId": result.get("caseId"),
+            "sourceId": result.get("sourceId"),
+            "linked": result.get("linked", {}),
+        },
+    }
 
 
 @app.get("/api/knowledge/case/doctor")

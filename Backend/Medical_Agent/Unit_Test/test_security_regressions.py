@@ -34,3 +34,18 @@ def test_agent_sessions_are_redis_backed_without_memory_saver():
     source = (BACKEND / "traditional_medical_agent" / "tcm_agent.py").read_text(encoding="utf-8")
     assert "from langgraph.checkpoint.memory import" not in source
     assert "class RedisSessionStore" in source
+
+
+def test_case_write_is_limited_to_authenticated_doctors_and_uses_server_identity():
+    source = (BACKEND / "fastapi_app" / "main.py").read_text(encoding="utf-8")
+    kg_server = (BACKEND / "knowledge_graph_service" / "server.js").read_text(encoding="utf-8")
+    env_example = (BACKEND / ".env.example").read_text(encoding="utf-8")
+
+    start = source.index("async def add_case_api")
+    body = source[start:start + 1800]
+    assert 'require_role(token_info, "doctor")' in body
+    assert "doctor = current_doctor(db, token_info)" in body
+    assert "author=doctor.name" in body
+    assert 'doctors=[{"name": doctor.name, "id": doctor.doctor_id}]' in body
+    assert 'KG_ALLOW_CASE_WRITE=false' in env_example
+    assert 'process.env.KG_ALLOW_CASE_WRITE === "true"' in kg_server
