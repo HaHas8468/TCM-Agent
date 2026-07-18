@@ -211,6 +211,7 @@ async function addCase(params = {}) {
   for (const [key, cfg] of Object.entries(ENTITY_TYPES)) {
     if (!entityParams[key].length) continue;
     blocks.push(`
+    WITH c
     UNWIND $${key} AS ${key}_item
       MERGE (${key}_node:KGNode:${cfg.label} {name: ${key}_item.name})
       ON CREATE SET ${key}_node.id = ${key}_item.id
@@ -218,6 +219,7 @@ async function addCase(params = {}) {
   }
   if (entityParams.channels.length) {
     blocks.push(`
+    WITH c
     UNWIND $channels AS channel_item
       MERGE (channel_node:KGNode:栏目 {name: channel_item.name})
       ON CREATE SET channel_node.id = channel_item.id

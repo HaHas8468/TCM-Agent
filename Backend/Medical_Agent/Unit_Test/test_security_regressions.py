@@ -51,3 +51,10 @@ def test_case_write_is_limited_to_authenticated_doctors_and_uses_server_identity
     assert 'process.env.KG_ALLOW_CASE_WRITE === "true"' in kg_server
     assert "_convert_entity_list(input_data.diseases)" in body
     assert "_case_entities_to_kg" not in body
+
+
+def test_case_write_cypher_keeps_case_node_in_scope_between_entity_blocks():
+    source = (BACKEND / "traditional_medical_agent" / "neo4j_case" / "neo4j_agent_api.js").read_text(encoding="utf-8")
+
+    assert "WITH c\n    UNWIND $${key}" in source
+    assert "WITH c\n    UNWIND $channels" in source

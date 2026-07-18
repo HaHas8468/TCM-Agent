@@ -500,8 +500,17 @@ async def http_exception_handler(_: Request, exc: HTTPException):
 
 
 @app.exception_handler(RequestValidationError)
-async def validation_exception_handler(_: Request, __: RequestValidationError):
-    return JSONResponse(status_code=422, content={"code": 422, "msg": "请求参数无效"})
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """返回可安全展示的字段校验信息，便于前端定位 422。"""
+    details = [
+        {"field": ".".join(str(part) for part in error.get("loc", ()) if part != "body"), "msg": error.get("msg", "参数无效")}
+        for error in exc.errors()
+    ]
+    logger.info("request_validation_failed path=%s fields=%s", request.url.path, [item["field"] for item in details])
+    return JSONResponse(
+        status_code=422,
+        content={"code": 422, "msg": "请求参数无效", "details": details},
+    )
 
 
 @app.exception_handler(Exception)
