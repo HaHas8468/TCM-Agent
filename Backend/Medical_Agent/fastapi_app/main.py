@@ -221,6 +221,36 @@ def get_db():
         db.close()
 
 
+def schedule_time_to_minutes(value: Any) -> int:
+    """将数据库 TIME / 字符串时间统一转换为当天的分钟数。"""
+    if isinstance(value, datetime):
+        return value.hour * 60 + value.minute
+    if isinstance(value, timedelta):
+        return (value.seconds // 60) % (24 * 60)
+    if hasattr(value, "hour") and hasattr(value, "minute"):
+        return int(value.hour) * 60 + int(value.minute)
+
+    parts = str(value).strip().split(":")
+    if len(parts) < 2:
+        raise ValueError("排班时间格式无效")
+    hour, minute = int(parts[0]), int(parts[1])
+    if not (0 <= hour < 24 and 0 <= minute < 60):
+        raise ValueError("排班时间超出范围")
+    return hour * 60 + minute
+
+
+def schedule_slot_times(schedule: ApiSchedule, interval_minutes: int = 30) -> List[str]:
+    """按排班起止时间生成固定间隔的可预约时段。"""
+    start_minutes = schedule_time_to_minutes(schedule.start_time)
+    end_minutes = schedule_time_to_minutes(schedule.end_time)
+    if end_minutes <= start_minutes:
+        return []
+    return [
+        f"{minute // 60:02d}:{minute % 60:02d}"
+        for minute in range(start_minutes, end_minutes, interval_minutes)
+    ]
+
+
 def get_patient_profile(db: Session, patient_id: str) -> Dict[str, Any]:
     patient = db.query(ApiPatient).filter(ApiPatient.patient_id == patient_id).first()
     if patient:
@@ -731,24 +761,17 @@ async def get_doctor_slots(doctor_id: str, date: str = None):
     schedules = db.query(ApiSchedule).filter(
         ApiSchedule.doctor_id == doctor.id,
         ApiSchedule.date == target_date,
-        ApiSchedule.status == 'available'
-    ).all()
+        ApiSchedule.status == 'available',
+        ApiSchedule.available_slots > 0,
+    ).order_by(ApiSchedule.start_time.asc(), ApiSchedule.id.asc()).all()
     
     available_slots = []
+    seen_slots = set()
     for schedule in schedules:
-        if isinstance(schedule.start_time, datetime):
-            start_hour = schedule.start_time.hour
-            end_hour = schedule.end_time.hour
-        elif isinstance(schedule.start_time, timedelta):
-            start_hour = schedule.start_time.seconds // 3600
-            end_hour = schedule.end_time.seconds // 3600
-        else:
-            start_str = str(schedule.start_time)
-            end_str = str(schedule.end_time)
-            start_hour = int(start_str.split(':')[0])
-            end_hour = int(end_str.split(':')[0])
-        for hour in range(start_hour, end_hour):
-            available_slots.append(f"{hour:02d}:00")
+        for slot in schedule_slot_times(schedule):
+            if slot not in seen_slots:
+                available_slots.append(slot)
+                seen_slots.add(slot)
     
     return {
         "code": 0,
@@ -773,14 +796,13 @@ async def create_order(input_data: CreateOrderInput, token_info: Dict[str, Any] 
     
     try:
         visit_date = datetime.strptime(input_data.date, '%Y-%m-%d').date()
-        start_hour = int(input_data.time.split(':', 1)[0])
         schedule = db.query(ApiSchedule).filter(
             ApiSchedule.doctor_id == doctor.id,
             ApiSchedule.date == visit_date,
             ApiSchedule.status == 'available',
             ApiSchedule.available_slots > 0,
-        ).with_for_update().all()
-        schedule = next((item for item in schedule if int(str(item.start_time).split(':', 1)[0]) <= start_hour < int(str(item.end_time).split(':', 1)[0])), None)
+        ).order_by(ApiSchedule.start_time.asc(), ApiSchedule.id.asc()).with_for_update().all()
+        schedule = next((item for item in schedule if input_data.time in schedule_slot_times(item)), None)
         if not schedule:
             db.rollback()
             return JSONResponse(status_code=409, content={"code": 409, "msg": "该时段不可预约或余号不足"})
@@ -1149,7 +1171,9 @@ async def get_diagnosis_history(authorization: str = Header(None), status: str =
     if not patient:
         return {"code": 404, "msg": "Patient not found"}
     
-    orders = db.query(ApiOrder).filter(ApiOrder.patient_id == patient.id).all()
+    orders = db.query(ApiOrder).filter(ApiOrder.patient_id == patient.id).order_by(
+        ApiOrder.created_at.desc(), ApiOrder.id.desc()
+    ).all()
     
     if status != 'all':
         orders = [o for o in orders if o.status == status]
@@ -1166,7 +1190,11 @@ async def get_diagnosis_history(authorization: str = Header(None), status: str =
                 'name': doctor.name if doctor else ""
             },
             'department': order.department or "",
+            # 保留 date 兼容旧前端；新增字段明确区分下单时间与预约时间。
             'date': order.created_at.isoformat() if order.created_at else "",
+            'created_at': order.created_at.isoformat() if order.created_at else "",
+            'appointment_date': order.date.isoformat() if order.date else "",
+            'appointment_time': order.time or "",
             'status': order.status,
             'symptoms_summary': ', '.join(order.symptoms) if order.symptoms else '',
             'diagnosis_summary': f"{order.syndrome}, {order.prescription}" if order.syndrome else '',
@@ -1204,7 +1232,10 @@ async def get_order_detail(order_id: str, token_info: Dict[str, Any] = Depends(r
         'prescription': order.prescription or "",
         'ingredients': order.ingredients or [],
         'advice': order.advice or "",
-        'date': order.created_at.isoformat() if order.created_at else ""
+        'date': order.created_at.isoformat() if order.created_at else "",
+        'created_at': order.created_at.isoformat() if order.created_at else "",
+        'appointment_date': order.date.isoformat() if order.date else "",
+        'appointment_time': order.time or "",
     }
     
     return {"code": 0, "data": data}

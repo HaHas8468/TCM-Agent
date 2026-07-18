@@ -84,9 +84,10 @@ export function mapDiagnosisHistory(list = []) {
         : status
     return {
       id: item.order_id,
+      createdAt: item.created_at || item.date || '',
       status,
       statusLabel,
-      appointmentDate: formatDateTime(item.date),
+      appointmentDate: [item.appointment_date, item.appointment_time].filter(Boolean).join(' ') || formatDateTime(item.date),
       doctorName: (item.doctor && item.doctor.name) || '接诊医生',
       department: item.department || '',
       clinic: '本草问方 · ' + (item.department || '门诊'),
@@ -133,8 +134,7 @@ export function mapOrderDetail(data = {}, ctx = {}) {
     statusLabel,
     department: ctx.department || data.department || '',
     doctorName: (data.doctor && data.doctor.name) || '接诊医生',
-    // 后端 order/record 的 date 为创建时间戳且不含预约 time，故下单时前端本地缓存的预约日期优先
-    appointmentDate: ctx.apptLabel || formatDateTime(data.date),
+    appointmentDate: [data.appointment_date, data.appointment_time].filter(Boolean).join(' ') || ctx.apptLabel || formatDateTime(data.date),
     chiefComplaint: data.chief_complaint || '',
     resultSummary: data.present_illness || data.symptoms_summary || '',
     diagnosisBasis: data.syndrome

@@ -183,14 +183,10 @@
 				return getDiagnosisHistory('all')
 					.then((list) => {
 					this.records = list
-						.map((item) => {
-							const appt = uni.getStorageSync('cm_appt_' + item.id)
-							return appt && appt.label ? { ...item, appointmentDate: appt.label } : item
-						})
 						.sort((a, b) => {
-							// 挂号记录按预约日期降序：日期越晚的排在越上面
-							const va = a.appointmentDate || ''
-							const vb = b.appointmentDate || ''
+							// 最新下单的挂号记录置顶；服务端已排序，此处作为兼容兜底。
+							const va = a.createdAt || ''
+							const vb = b.createdAt || ''
 							if (va === vb) return 0
 							return vb > va ? 1 : -1
 						})

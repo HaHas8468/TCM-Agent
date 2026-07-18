@@ -74,10 +74,17 @@
 								<text class="time-select__value">{{ selectedDate }}</text>
 							</view>
 						</picker>
-						<picker class="time-picker" mode="time" :value="selectedTime" @change="handleTimeChange">
+						<picker
+							class="time-picker"
+							mode="selector"
+							:range="availableSlots"
+							:value="selectedTimeIndex"
+							:disabled="availableSlots.length === 0"
+							@change="handleTimeChange"
+						>
 							<view class="time-select">
 								<text class="time-select__label">预约时间</text>
-								<text class="time-select__value">{{ selectedTime }}</text>
+								<text class="time-select__value">{{ selectedTime || '暂无可预约时段' }}</text>
 							</view>
 						</picker>
 					</view>
@@ -163,6 +170,10 @@
 			},
 			selectedDepartmentIndex() {
 				const index = this.departments.indexOf(this.selectedDepartment)
+				return index >= 0 ? index : 0
+			},
+			selectedTimeIndex() {
+				const index = this.availableSlots.indexOf(this.selectedTime)
 				return index >= 0 ? index : 0
 			},
 			filteredDoctors() {
@@ -264,9 +275,13 @@
 				getDoctorSlots(this.selectedDoctorId, this.selectedDate)
 					.then((data) => {
 						this.availableSlots = (data && data.available_slots) || []
+						this.selectedTime = this.availableSlots.includes(this.selectedTime)
+							? this.selectedTime
+							: (this.availableSlots[0] || '')
 					})
 					.catch(() => {
 						this.availableSlots = []
+						this.selectedTime = ''
 					})
 			},
 			handleDepartmentChange(event) {
@@ -287,7 +302,7 @@
 				this.fetchSlots()
 			},
 			handleTimeChange(event) {
-				this.selectedTime = event.detail.value
+				this.selectedTime = this.availableSlots[Number(event.detail.value)] || ''
 			},
 			selectDoctor(doctor) {
 				if (this.selectedDoctorId === doctor.id) {
@@ -304,7 +319,14 @@
 					})
 					return
 				}
-				if (this.availableSlots.length && !this.availableSlots.includes(this.selectedTime)) {
+				if (!this.availableSlots.length) {
+					uni.showToast({
+						title: '当前医生当日无可预约时段',
+						icon: 'none'
+					})
+					return
+				}
+				if (!this.availableSlots.includes(this.selectedTime)) {
 					uni.showToast({
 						title: '该时段暂不可预约，请重新选择',
 						icon: 'none'
