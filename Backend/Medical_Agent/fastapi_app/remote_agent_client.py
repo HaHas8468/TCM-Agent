@@ -11,11 +11,20 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 
+def _get_stream_read_timeout() -> float:
+    """读取 Agent SSE 的最长空闲时间，避免模型生成期间被网关误判超时。"""
+    try:
+        return max(1.0, float(os.getenv("AGENT_STREAM_READ_TIMEOUT_SECONDS", "120")))
+    except (TypeError, ValueError):
+        return 120.0
+
+
 class RemoteAgentClient:
     def __init__(self, base_url: Optional[str] = None, api_key: Optional[str] = None, timeout: int = 30):
         self.base_url = base_url or os.getenv('AGENT_BASE_URL', '')
         self.api_key = api_key or os.getenv('AGENT_API_KEY', '')
         self.timeout = timeout
+        self.stream_read_timeout = _get_stream_read_timeout()
         self._client = None
         self._async_client = None
 
@@ -279,7 +288,13 @@ class RemoteAgentClient:
         if patient_profile:
             payload["patient_profile"] = patient_profile
         try:
-            async with self._get_async_client().stream('POST', '/agent/stream', json=payload) as response:
+            stream_timeout = httpx.Timeout(self.timeout, read=self.stream_read_timeout)
+            async with self._get_async_client().stream(
+                'POST',
+                '/agent/stream',
+                json=payload,
+                timeout=stream_timeout,
+            ) as response:
                 response.raise_for_status()
                 async for chunk in response.aiter_text():
                     if chunk:

@@ -58,6 +58,15 @@ def test_knowledge_graph_is_an_internal_compose_service():
     assert "MAX_CONCURRENCY" in server
 
 
+def test_gateway_streaming_uses_a_dedicated_read_timeout():
+    source = (BACKEND / "fastapi_app" / "remote_agent_client.py").read_text(encoding="utf-8")
+    env_example = (BACKEND / ".env.example").read_text(encoding="utf-8")
+
+    assert 'AGENT_STREAM_READ_TIMEOUT_SECONDS' in source
+    assert 'httpx.Timeout(self.timeout, read=self.stream_read_timeout)' in source
+    assert 'AGENT_STREAM_READ_TIMEOUT_SECONDS=120' in env_example
+
+
 def test_gateway_declares_limits_and_generic_exception_response():
     source = (BACKEND / "fastapi_app" / "main.py").read_text(encoding="utf-8")
 
