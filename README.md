@@ -32,17 +32,17 @@ TCM_Agent/
 
 ## 快速开始
 
-### 1. 全栈生产部署（推荐）
+### 1. 全栈端口部署（推荐）
 
-生产环境只需要 Docker Compose、域名和有效的 DNS 解析。根目录 `.env` 是唯一生产配置来源：
+部署只需要 Docker Compose；项目不绑定域名、不签发证书。根目录 `.env` 是唯一生产配置来源：
 
 ```bash
 cp .env.example .env
-# 编辑 .env：填写 APP_DOMAIN、LETSENCRYPT_EMAIL、数据库/Neo4j/Agent/模型密钥
+# 编辑 .env：填写端口、数据库/Neo4j/Agent/模型密钥
 ./scripts/deploy.sh
 ```
 
-部署后，患者端为 `https://<APP_DOMAIN>/`，医生端为 `https://<APP_DOMAIN>/doctor/`，API 为同域名下的 `/api/`。首次执行会经 Certbot 自动签发证书。完整前置条件、备份、恢复和回滚见[Linux 全栈部署指南](docs/guides/deployment/linux-docker-compose.md)。
+部署后，患者端为 `http://服务器IP:<PATIENT_PORT>/`，医生端为 `http://服务器IP:<DOCTOR_PORT>/`，两端 API 均为各自同源路径 `/api/`。如需绑定域名、HTTPS 或统一入口，请由部署者的 Nginx、Caddy、Traefik 等外层反向代理转发至对应端口。完整前置条件、备份、恢复和回滚见[Linux 全栈部署指南](docs/guides/deployment/linux-docker-compose.md)。
 
 ### 2. 本地开发
 
@@ -55,7 +55,7 @@ cd frontend/DoctorBackgroundSystem && npm install && npm run dev
 
 两套开发服务器均通过 `/api` 代理访问后端；如后端不在本机，可设置 `VITE_DEV_PROXY_TARGET`。小程序等非 H5 端使用 `VITE_API_BASE_URL` 配置完整后端地址。
 
-### 3. Docker 一键演示（不配置域名）
+### 3. Docker 一键启动
 
 填写根目录 `.env` 中的数据库、Neo4j、Agent 与模型密钥后，可直接启动全部服务：
 
@@ -64,7 +64,7 @@ docker compose up --build -d
 docker compose ps
 ```
 
-患者端访问 `http://服务器IP:8080/`，医生端访问 `http://服务器IP:3000/`。两端均通过同源 `/api` 访问后端，不需要单独设置前端 API 地址。该入口用于本机或局域网演示；公网正式使用请继续使用 HTTPS 部署流程。
+患者端访问 `http://服务器IP:8080/`，医生端访问 `http://服务器IP:3000/`（端口可在 `.env` 调整）。两端均通过同源 `/api` 访问后端，不需要单独设置前端 API 地址；生产环境可由部署者在外层反向代理中自行绑定域名和 HTTPS。
 
 ## 文档
 

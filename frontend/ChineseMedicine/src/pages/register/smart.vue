@@ -26,7 +26,10 @@
 			<view class="session-panel" @tap.stop>
 				<view class="session-panel__head">
 					<text class="session-panel__title">历史对话</text>
-					<text class="session-panel__count">{{ aiSessions.length }} 条</text>
+					<view class="session-panel__head-actions">
+						<text class="session-panel__count">{{ aiSessions.length }} 条</text>
+						<button v-if="aiSessions.length" class="session-panel__clear" @tap="confirmClearAiSessions">清空</button>
+					</view>
 				</view>
 				<scroll-view v-if="aiSessions.length" class="session-panel__list" scroll-y :show-scrollbar="false">
 					<view
@@ -36,7 +39,10 @@
 						:class="{ 'session-panel__item--active': session.id === sessionId }"
 						@tap="loadSession(session)"
 					>
-						<text class="session-panel__summary">{{ session.summary }}</text>
+						<view class="session-panel__item-head">
+							<text class="session-panel__summary">{{ session.summary }}</text>
+							<button class="session-panel__delete" @tap.stop="confirmRemoveAiSession(session)">删除</button>
+						</view>
 						<view class="session-panel__meta">
 							<text>{{ session.department || '智能挂号咨询' }}</text>
 							<text>{{ formatSessionTime(session.updatedAt) }}</text>
@@ -219,7 +225,7 @@
 </template>
 
 <script>
-	import { getAiSessions, saveAiSession } from '../../config/ai-sessions'
+	import { clearAiSessions, getAiSessions, removeAiSession, saveAiSession } from '../../config/ai-sessions'
 	import { sendAgentMessageStream, buildDiagnosisResult } from '../../api'
 	import { getPatientId } from '../../config/http'
 
@@ -316,6 +322,41 @@
 				this.draft = ''
 				this.showSessionPanel = false
 				this.scrollToBottom()
+			},
+			confirmRemoveAiSession(session) {
+				uni.showModal({
+					title: '删除会话',
+					content: '删除后无法恢复，确定删除这条会话吗？',
+					success: ({ confirm }) => {
+						if (!confirm) return
+						this.aiSessions = removeAiSession(session.id)
+						if (this.sessionId === session.id) {
+							this.sessionId = ''
+							this.messages = []
+							this.recommendation = null
+							this.draft = ''
+							this.scrollToBottom()
+						}
+						uni.showToast({ title: '已删除', icon: 'success' })
+					}
+				})
+			},
+			confirmClearAiSessions() {
+				uni.showModal({
+					title: '清空会话记录',
+					content: '将删除全部 AI 会话记录，且无法恢复。',
+					success: ({ confirm }) => {
+						if (!confirm) return
+						clearAiSessions()
+						this.aiSessions = []
+						this.sessionId = ''
+						this.messages = []
+						this.recommendation = null
+						this.draft = ''
+						this.showSessionPanel = false
+						uni.showToast({ title: '已清空', icon: 'success' })
+					}
+				})
 			},
 			createNewConversation() {
 				if (this.sending) {
@@ -729,6 +770,16 @@
 		border-bottom: 1rpx solid rgba(47, 69, 56, 0.08);
 	}
 
+	.session-panel__head-actions,
+	.session-panel__item-head {
+		display: flex;
+		align-items: center;
+	}
+
+	.session-panel__head-actions {
+		gap: 14rpx;
+	}
+
 	.session-panel__title,
 	.session-panel__count,
 	.session-panel__summary,
@@ -755,6 +806,11 @@
 		max-height: 500rpx;
 	}
 
+	.session-panel__item-head {
+		justify-content: space-between;
+		gap: 16rpx;
+	}
+
 	.session-panel__item {
 		padding: 22rpx 26rpx;
 		border-bottom: 1rpx solid rgba(47, 69, 56, 0.07);
@@ -769,6 +825,8 @@
 	}
 
 	.session-panel__summary {
+		flex: 1;
+		min-width: 0;
 		overflow: hidden;
 		font-size: 26rpx;
 		font-weight: 600;
@@ -776,6 +834,26 @@
 		text-overflow: ellipsis;
 		white-space: nowrap;
 		color: $cm-text-title;
+	}
+
+	.session-panel__clear,
+	.session-panel__delete {
+		margin: 0;
+		padding: 0;
+		border: 0;
+		background: transparent;
+		font-size: 21rpx;
+		line-height: 1.4;
+		color: #d9534f;
+	}
+
+	.session-panel__clear::after,
+	.session-panel__delete::after {
+		border: 0;
+	}
+
+	.session-panel__delete {
+		flex-shrink: 0;
 	}
 
 	.session-panel__meta {

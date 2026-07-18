@@ -96,8 +96,13 @@
 					<text class="history-empty__hint">在主页进入智能挂号与助手沟通后，会话会自动保存到这里。</text>
 				</view>
 
-				<view v-else class="history-list">
-					<button
+				<view v-else>
+					<view class="session-actions">
+						<text class="session-actions__count">共 {{ aiSessions.length }} 条会话</text>
+						<button class="session-actions__clear" @tap="confirmClearAiSessions">清空</button>
+					</view>
+					<view class="history-list">
+						<view
 						v-for="session in aiSessions"
 						:key="session.id"
 						class="session-card"
@@ -115,13 +120,14 @@
 								<text class="session-card__title">AI 智能挂号 · {{ session.summary }}</text>
 								<text class="session-card__meta">{{ session.updatedAt }}</text>
 							</view>
-							<text class="session-card__arrow">›</text>
+							<button class="session-card__delete" @tap.stop="confirmRemoveAiSession(session)">删除</button>
 						</view>
 						<view v-if="session.department" class="session-card__pill">
 							<text class="session-card__pill-label">建议科室</text>
 							<text class="session-card__pill-value">{{ session.department }}</text>
 						</view>
-					</button>
+						</view>
+					</view>
 				</view>
 			</view>
 		</view>
@@ -130,7 +136,7 @@
 
 <script>
 	import { getDiagnosisHistory } from '../../api'
-	import { getAiSessions } from '../../config/ai-sessions'
+	import { clearAiSessions, getAiSessions, removeAiSession } from '../../config/ai-sessions'
 
 	export default {
 		data() {
@@ -224,6 +230,29 @@
 				const payload = encodeURIComponent(JSON.stringify(session))
 				uni.navigateTo({
 					url: `/pages/user/history-detail?type=ai&payload=${payload}`
+				})
+			},
+			confirmRemoveAiSession(session) {
+				uni.showModal({
+					title: '删除会话',
+					content: '删除后无法恢复，确定删除这条会话吗？',
+					success: ({ confirm }) => {
+						if (!confirm) return
+						this.aiSessions = removeAiSession(session.id)
+						uni.showToast({ title: '已删除', icon: 'success' })
+					}
+				})
+			},
+			confirmClearAiSessions() {
+				uni.showModal({
+					title: '清空会话记录',
+					content: '将删除全部 AI 会话记录，且无法恢复。',
+					success: ({ confirm }) => {
+						if (!confirm) return
+						clearAiSessions()
+						this.aiSessions = []
+						uni.showToast({ title: '已清空', icon: 'success' })
+					}
 				})
 			}
 		}
@@ -619,6 +648,35 @@
 		text-align: left;
 	}
 
+	.session-actions {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		margin-top: 20rpx;
+		padding: 0 8rpx;
+	}
+
+	.session-actions__count {
+		font-size: 22rpx;
+		color: $cm-text-secondary;
+	}
+
+	.session-actions__clear,
+	.session-card__delete {
+		margin: 0;
+		padding: 0;
+		border: 0;
+		background: transparent;
+		font-size: 22rpx;
+		line-height: 1.5;
+		color: #d9534f;
+	}
+
+	.session-actions__clear::after,
+	.session-card__delete::after {
+		border: 0;
+	}
+
 	.session-card::after {
 		border: 0;
 	}
@@ -666,12 +724,9 @@
 		color: $cm-text-secondary;
 	}
 
-	.session-card__arrow {
+	.session-card__delete {
 		flex-shrink: 0;
 		margin-left: 12rpx;
-		font-size: 40rpx;
-		line-height: 1;
-		color: #94a09b;
 	}
 
 	.session-card__pill {

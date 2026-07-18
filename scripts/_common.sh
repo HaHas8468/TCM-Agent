@@ -46,14 +46,12 @@ is_placeholder() {
 require_production_config() {
   require_env_file
   local key value
-  for key in APP_DOMAIN LETSENCRYPT_EMAIL MYSQL_PASSWORD MYSQL_ROOT_PASSWORD NEO4J_PASSWORD AGENT_API_KEY DASHSCOPE_API_KEY; do
+  for key in MYSQL_PASSWORD MYSQL_ROOT_PASSWORD NEO4J_PASSWORD AGENT_API_KEY DASHSCOPE_API_KEY; do
     value=$(env_value "$key")
     is_placeholder "$value" && die "$key 未配置真实值。"
   done
-  [[ $(env_value APP_DOMAIN) =~ ^[A-Za-z0-9.-]+$ ]] || die "APP_DOMAIN 格式不合法。"
-  [[ $(env_value LETSENCRYPT_EMAIL) == *"@"* ]] || die "LETSENCRYPT_EMAIL 格式不合法。"
-  [[ ",$(env_value CORS_ORIGINS)," == *",https://$(env_value APP_DOMAIN),"* ]] \
-    || die "CORS_ORIGINS 必须包含 https://APP_DOMAIN。"
+  [[ $(env_value PATIENT_PORT) =~ ^[0-9]{2,5}$ ]] || die "PATIENT_PORT 必须是有效端口号。"
+  [[ $(env_value DOCTOR_PORT) =~ ^[0-9]{2,5}$ ]] || die "DOCTOR_PORT 必须是有效端口号。"
 }
 
 require_docker() {
@@ -74,7 +72,7 @@ wait_for_service() {
     id=$(service_id "$service")
     if [ -n "$id" ]; then
       state=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$id" 2>/dev/null || true)
-      if [ "$state" = "healthy" ] || { [ "$state" = "running" ] && [ "$service" = "certbot" ]; }; then
+      if [ "$state" = "healthy" ]; then
         return 0
       fi
     fi

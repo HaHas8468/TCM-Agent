@@ -103,3 +103,15 @@ export function getAiSessions() {
 		.map(normalizeSession)
 		.sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''))
 }
+
+/** 删除指定 AI 会话记录，返回删除后剩余的记录 */
+export function removeAiSession(sessionId) {
+	const list = readAll().filter((item) => item && item.id !== sessionId)
+	writeAll(list)
+	return getAiSessions()
+}
+
+/** 清空全部 AI 会话记录 */
+export function clearAiSessions() {
+	uni.removeStorageSync(SESSIONS_STORAGE_KEY)
+}

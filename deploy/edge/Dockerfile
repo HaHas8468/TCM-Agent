@@ -19,7 +19,4 @@ RUN npm run build
 FROM nginx:1.27-alpine
 COPY --from=patient-build /build/dist/build/h5/ /usr/share/nginx/html/patient/
 COPY --from=doctor-build /build/dist/ /usr/share/nginx/html/doctor/
-COPY deploy/edge/10-select-config.sh /docker-entrypoint.d/10-select-config.sh
-COPY deploy/edge/http.conf.template /opt/tcm-nginx-templates/http.conf.template
-COPY deploy/edge/https.conf.template /opt/tcm-nginx-templates/https.conf.template
-RUN chmod +x /docker-entrypoint.d/10-select-config.sh
+COPY deploy/edge/http.conf.template /etc/nginx/templates/default.conf.template
