@@ -2281,7 +2281,7 @@ def tcm_agent_stream_chat(session_id: str, patient_id: str, user_input: str, mod
             if not _is_real_followup:
                 try:
                     llm = _get_llm_32b()
-                    from langchain_core.messages import SystemMessage, HumanMessage
+                    from langchain_core.messages import SystemMessage
                     if scene == "guide":
                         sys_prompt = "你是一位温和、专业的中医健康助手。患者已完成预问诊诊断，现在提出了一个问题，请基于已有上下文友好回答。如果患者问的是如何测量舌象脉象等知识性问题，请详细指导。回答简洁明了。"
                     else:
@@ -2584,7 +2584,7 @@ def tcm_agent_chat(session_id: str, patient_id: str, user_input: str, mode: str 
                 # 患者问的不是症状追问，用LLM正常回答
                 try:
                     llm = _get_llm_32b()
-                    from langchain_core.messages import SystemMessage, HumanMessage
+                    from langchain_core.messages import SystemMessage
                     if scene == "guide":
                         sys_prompt = "你是一位温和、专业的中医健康助手。患者已完成预问诊诊断，现在提出了一个问题，请基于已有上下文友好回答。如果患者问的是如何测量舌象脉象等知识性问题，请详细指导。回答简洁明了。"
                     else:

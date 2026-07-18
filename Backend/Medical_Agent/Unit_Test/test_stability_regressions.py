@@ -28,6 +28,14 @@ def test_runtime_paths_do_not_spawn_node_or_log_raw_consultation_data():
     assert '"response": f"处理失败：{str(e)}"' not in agent_source
 
 
+def test_sync_chat_does_not_shadow_human_message_before_message_creation():
+    source = (BACKEND / "traditional_medical_agent" / "tcm_agent.py").read_text(encoding="utf-8")
+    start = source.index("def tcm_agent_chat(")
+    body = source[start:]
+
+    assert "from langchain_core.messages import SystemMessage, HumanMessage" not in body
+
+
 def test_knowledge_graph_is_an_internal_compose_service():
     compose = (BACKEND / "docker-compose.yml").read_text(encoding="utf-8")
     server = (BACKEND / "knowledge_graph_service" / "server.js").read_text(encoding="utf-8")
