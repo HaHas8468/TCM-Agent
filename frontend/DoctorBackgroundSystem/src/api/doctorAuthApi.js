@@ -52,6 +52,16 @@ export function saveDoctorAuthSession(session = {}) {
   }
 }
 
+export function getDoctorAuthSession() {
+  const storage = safeStorage()
+
+  if (!storage) {
+    return ''
+  }
+
+  return storage.getItem(DOCTOR_AUTH_STORAGE_KEYS.token) || ''
+}
+
 export function clearDoctorAuthSession() {
   const storage = safeStorage()
 

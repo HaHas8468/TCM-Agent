@@ -1,7 +1,8 @@
-import { computed, reactive } from 'vue'
+import { computed, onMounted, reactive } from 'vue'
 import {
   clearDoctorAuthSession,
   clearRememberedDoctorAccount,
+  getDoctorAuthSession,
   getRememberedDoctorAccount,
   loginDoctor,
   rememberDoctorAccount,
@@ -415,6 +416,7 @@ function syncAgentDiagnosisToPatient(patient, diagnosis = {}, responseText = '')
 
 export function useDoctorPrototype() {
   const seed = cloneSeed()
+  const storedAuthToken = getDoctorAuthSession()
   const initialRememberedAccount = getRememberedDoctorAccount() || seed.settings?.profile?.account || ''
   const profileSeed = seed.settings?.profile || seed.doctorProfile || {}
   const doctorProfile = createDoctorProfileView(profileSeed, seed.doctorProfile?.dutyStatus)
@@ -422,10 +424,11 @@ export function useDoctorPrototype() {
   const initialRecords = []
 
   const state = reactive({
-    loggedIn: false,
+    // 刷新页面时先复用本地令牌，再由 mounted 钩子向后端校验其有效性。
+    loggedIn: Boolean(storedAuthToken),
     loginPending: false,
     loginError: '',
-    authToken: '',
+    authToken: storedAuthToken,
     doctorId: '',
     rememberedAccount: initialRememberedAccount,
     agentSending: false,
@@ -1197,6 +1200,27 @@ export function useDoctorPrototype() {
       state.loginError = formatErrorMessage(error, '登录失败，请稍后重试。')
     } finally {
       state.loginPending = false
+    }
+  }
+
+  async function restoreDoctorSession() {
+    if (!state.authToken) {
+      return
+    }
+
+    try {
+      const profile = await getDoctorProfile(state.authToken)
+      state.doctorId = profile?.doctor_id || state.doctorId
+      syncDoctorProfileState(profile || {})
+      state.loggedIn = true
+      await Promise.allSettled([fetchDepartmentOptions(), fetchQueue(), fetchCaseLibrary()])
+    } catch (error) {
+      // 令牌过期或已被撤销时才回到登录页，避免每次刷新都丢失登录态。
+      console.warn('医生登录态已失效，请重新登录。', error)
+      state.loggedIn = false
+      state.authToken = ''
+      state.doctorId = ''
+      clearDoctorAuthSession()
     }
   }
 
@@ -2034,6 +2058,10 @@ export function useDoctorPrototype() {
       setWorkspaceActionError(formatErrorMessage(error, '完成接诊失败，请稍后重试。'), 'finish')
     }
   }
+
+  onMounted(() => {
+    restoreDoctorSession()
+  })
 
   return {
     state,
