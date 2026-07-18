@@ -104,7 +104,7 @@ class SymptomsInfo(BaseModel):
 
 
 class RedisSessionStore:
-    """使用带 TTL 的 Redis 保存会话，避免旧病例残留在进程内存。"""
+    """带 TTL 的 Redis 会话存储，避免进程重启或跨病例串话。"""
 
     def __init__(self, ttl_seconds: int = 3600):
         self.ttl_seconds = ttl_seconds
@@ -229,7 +229,7 @@ def _escape_braces(text: str) -> str:
 
 def _supervisor_decide(scene: str, mode: str, user_input: str, symptoms_info: Optional[SymptomsInfo], history_str: str) -> SupervisorDecision:
     """Supervisor: 单次 LLM 调用，判断意图"""
-    
+
     known_info = ""
     if symptoms_info:
         known_parts = []
@@ -241,7 +241,7 @@ def _supervisor_decide(scene: str, mode: str, user_input: str, symptoms_info: Op
             known_parts.append(f"脉象：{symptoms_info.pulse}")
         if known_parts:
             known_info = "\n【已知信息】当前已收集：\n" + "\n".join(known_parts) + "\n\n"
-    
+
     if scene == "guide":
         system_prompt = """你是中医药问诊系统的Supervisor，负责判断用户意图并调度。
 
@@ -500,36 +500,42 @@ def _supervisor_decide(scene: str, mode: str, user_input: str, symptoms_info: Op
 - user_refused：用户是否委婉表示无法或不愿提供更多信息（但未明确要求结束）。包括但不限于：用户说"不知道""没有细节""不会描述""不清楚""没别的了""说完了""就这些了""没有要说的""不会""不懂""没有其他""没有了""没别的"等表达。注意：用户重复已有症状不视为拒绝。
 - force_diagnosis：是否应强制进入诊断流程。当用户明确要求诊断（user_explicit_stop=true）或已有症状且用户连续拒绝提供信息时设为true。
 判断时需理解用户的真实意图，而非简单匹配关键词。""" + known_info
-    
+
     symptoms_str = "无"
     if symptoms_info:
         symptoms_str = f"症状={symptoms_info.symptoms}, 舌象={symptoms_info.tongue or '无'}, 脉象={symptoms_info.pulse or '无'}"
-    
+
     if len(history_str) > 2000:
         history_str = history_str[-2000:]
-    
+
     human_msg = f"对话历史：\n{history_str}\n\n当前用户输入：{_escape_braces(user_input)}\n\n场景={scene}, 模式={mode}\n当前症状信息：{symptoms_str}\n\n请输出意图判断。"
-    
+
     prompt = ChatPromptTemplate.from_messages([
         ("system", system_prompt),
         ("human", human_msg)
     ])
-    
+
     structured_llm = _get_llm_32b().with_structured_output(SupervisorDecision)
     chain = prompt | structured_llm
     return chain.invoke({})
 
 
 def _extract_symptoms_llm(user_input: str, history_str: str) -> SymptomsInfo:
-    """按算法版从对话历史与当前输入提取并标准化四诊信息。"""
+    """从用户输入中提取症状信息（单次 LLM 调用，含症状标准化）"""
+
+    user_input_escaped = _escape_braces(user_input)
+
     if len(history_str) > 2000:
         history_str = history_str[-2000:]
+
     prompt = ChatPromptTemplate.from_messages([
         ("system", SYMPTOM_NORMALIZATION_PROMPT),
-        ("human", f"对话历史：\n{_escape_braces(history_str)}\n\n当前输入：{_escape_braces(user_input)}\n\n请提取并标准化症状信息。")
+        ("human", f"对话历史：\n{_escape_braces(history_str)}\n\n当前输入：{user_input_escaped}\n\n请提取并标准化症状信息。")
     ])
+
     structured_llm = _get_llm_32b().with_structured_output(SymptomsInfo)
-    return (prompt | structured_llm).invoke({})
+    chain = prompt | structured_llm
+    return chain.invoke({})
 
 
 def _diagnose_and_respond(
@@ -542,29 +548,29 @@ def _diagnose_and_respond(
     mode: str,
 ) -> tuple:
     """诊断 + 回复：单次 LLM 调用完成症状标准化、KG查询、科室判断、回复生成"""
-    
+
     symptoms = symptoms[:5]
-    
+
     logger.debug(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ====== 知识图谱查询 ======")
     logger.debug(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 查询症状: {symptoms}")
-    
+
     start_time = time.time()
     kg_result = query_kg_for_symptoms(symptoms, allergy_herbs)
     kg_time = time.time() - start_time
     logger.debug(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 知识图谱查询完成, 耗时={kg_time:.2f}秒")
-    
+
     kg_raw_result = kg_result.get("raw", {})
-    
+
     prescription_list = kg_result.get("prescription", [])
     zheng_list = kg_result.get("zheng", [])
     herbs_list = kg_result.get("herbs", [])
     warnings_list = kg_result.get("warnings", [])
-    
+
     logger.debug(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] KG结果: prescriptions={len(prescription_list)}, zheng={len(zheng_list)}, herbs={len(herbs_list)}")
-    
+
     safe_prescriptions = []
     unsafe_prescriptions = []
-    
+
     for p_data in prescription_list[:5]:
         p_name = p_data.get("prescription", "")
         p_ingredients = p_data.get("ingredients", [])
@@ -581,7 +587,7 @@ def _diagnose_and_respond(
             unsafe_prescriptions.append(p_data)
         else:
             safe_prescriptions.append(p_data)
-    
+
     if safe_prescriptions:
         prescription_data = safe_prescriptions[0]
         prescription_name = prescription_data.get("prescription", "未找到方剂")
@@ -601,19 +607,19 @@ def _diagnose_and_respond(
         ingredients = []
         kg_therapy = ""
         kg_precautions = ""
-    
+
     if not ingredients and prescription_name == "无最佳匹配方剂":
         ingredients = ["暂无匹配药材"]
-    
+
     zheng_data = zheng_list[0] if zheng_list else {}
     syndrome = zheng_data.get("syndrome", "辨证不明确") if zheng_data else "辨证不明确"
     treatment_principle = zheng_data.get("treatment_principle", "") if zheng_data else ""
-    
+
     all_prescriptions_info = {
         "available": [p.get("prescription", "") for p in safe_prescriptions[:3]],
         "filtered_by_allergy": [p.get("prescription", "") for p in unsafe_prescriptions[:3]],
     }
-    
+
     filtered_by_allergy_from_kg = []
     if kg_raw_result.get("notRecommendedTreatmentPlans"):
         for plan in kg_raw_result["notRecommendedTreatmentPlans"][:3]:
@@ -621,10 +627,10 @@ def _diagnose_and_respond(
             labels = plan.get("labels", [])
             if name and "方剂" in labels:
                 filtered_by_allergy_from_kg.append(name)
-    
+
     if filtered_by_allergy_from_kg:
         all_prescriptions_info["filtered_by_allergy"] = filtered_by_allergy_from_kg
-    
+
     context_parts = []
     context_parts.append(f"症状：{', '.join(symptoms[:10])}")
     if tongue:
@@ -634,7 +640,7 @@ def _diagnose_and_respond(
     context_parts.append(f"证型：{syndrome}")
     if treatment_principle:
         context_parts.append(f"治法：{treatment_principle}")
-    
+
     if prescription_name == "无最佳匹配方剂" and allergy_herbs:
         context_parts.append(f"方剂：无最佳匹配方剂")
         if all_prescriptions_info["filtered_by_allergy"]:
@@ -644,10 +650,10 @@ def _diagnose_and_respond(
         context_parts.append(f"推荐方剂：{prescription_name}")
         if ingredients and ingredients != ["暂无匹配药材"]:
             context_parts.append(f"药材：{'、'.join(ingredients)}")
-    
+
     if allergy_herbs:
         context_parts.append(f"过敏警告：患者对{'、'.join(allergy_herbs)}过敏")
-    
+
     if scene == "guide":
         system_prompt = """你是一位温和、专业的中医健康助手，正在和一位患者进行线上问诊。
 
@@ -696,12 +702,12 @@ def _diagnose_and_respond(
 - 过敏药材绝不能出现在推荐方剂中
 - 知识图谱未找到的方剂不要自行编造
 - 根据实际提供的信息进行分析，如果信息完整则给出完整分析，如果信息不完整则基于已有信息给出初步分析"""
-    
+
     user_content = "\n".join(context_parts)
-    
+
     if len(user_content) > 3000:
         user_content = user_content[:3000] + "\n\n（信息过长，已截断）"
-    
+
     output_format = '请按以下JSON格式输出（所有字段均为字符串）:\n' + _escape_braces('{\n  "department": "推荐科室",\n  "therapy": "用法用量",\n  "precautions": "注意事项",\n  "response": "自然语言回复"\n}')
 
     prompt = ChatPromptTemplate.from_messages([
@@ -728,14 +734,14 @@ def _diagnose_and_respond(
         try:
             response_raw = _get_llm_32b().invoke(prompt.invoke({}))
             response_text = response_raw.content if hasattr(response_raw, 'content') else str(response_raw)
-            
+
             import re
             dept_match = re.search(r'"department"\s*:\s*"([^"]+)"', response_text)
             if dept_match:
                 department = dept_match.group(1)
             else:
                 department = "中医内科"
-            
+
             resp_match = re.search(r'"response"\s*:\s*"((?:[^"\\]|\\.)*)"', response_text, re.DOTALL)
             if resp_match:
                 response = resp_match.group(1).replace('\\"', '"').replace('\\n', '\n')
@@ -755,7 +761,7 @@ def _diagnose_and_respond(
                 response_parts.append("建议及时前往医院就诊。")
             response = " ".join(response_parts)
             department = "中医内科"
-    
+
     diagnosis_result = DiagnosisResult(
         syndrome=syndrome,
         treatment_principle=treatment_principle,
@@ -767,9 +773,9 @@ def _diagnose_and_respond(
         allergy_warnings=allergy_herbs if allergy_herbs else None,
         kg_warning=warnings_list[0] if warnings_list else "",
     )
-    
+
     kg_raw_result["all_prescriptions_info"] = all_prescriptions_info
-    
+
     return diagnosis_result, kg_raw_result, response
 
 
@@ -826,7 +832,8 @@ def supervisor_node(state: AgentState) -> AgentState:
     if decision.user_refused:
         refuse_count += 1
 
-    # 与算法版一致：用户明确拒绝或要求结束追问时，以已收集信息直接进入辨证。
+    # LLM 判断用户明确拒绝或要求结束追问时，只要有症状就直接进入诊断，不再追问
+    # 但如果用户同时询问挂号/科室，优先处理科室咨询
     if (decision.user_explicit_stop or decision.user_refused or decision.force_diagnosis) and intent not in ("custom_query", "medical_case", "department_inquiry"):
         if has_symptoms:
             intent = "diagnosis"
@@ -966,29 +973,42 @@ def supervisor_node(state: AgentState) -> AgentState:
                             "请自己或请家人帮忙摸脉，描述大致感受（如跳得快还是慢、轻按还是重按才摸到等）。"
                         )
 
-    # 与算法版一致：已辨证后补充症状时，累加症状并再次辨证。
-    elif intent == "diagnosis":
+    # 当intent=diagnosis且已有症状信息时，提取新输入中的症状并合并
+    # 解决：用户补充新症状以区分两个病时，新症状没有累加到旧列表的问题
+    # 默认舌象脉象不变（保留已有），只有症状需要累加后重新查找
+    if intent == "diagnosis":
         existing_si = state.get("symptoms_info")
-        if isinstance(existing_si, SymptomsInfo) and existing_si.symptoms:
-            incoming_si = _extract_symptoms_llm(state["user_input"], history_str)
-            if incoming_si.symptoms:
-                merged_symptoms = list(set((existing_si.symptoms or []) + (incoming_si.symptoms or [])))
-                merged_tongue = existing_si.tongue or incoming_si.tongue
-                merged_pulse = existing_si.pulse or incoming_si.pulse
-                missing_items = [label for label, value in (("舌象", merged_tongue), ("脉象", merged_pulse)) if not value]
-                updated_symptoms_info = SymptomsInfo(
-                    symptoms=merged_symptoms,
-                    tongue=merged_tongue,
-                    pulse=merged_pulse,
-                    chief_complaint=incoming_si.chief_complaint or existing_si.chief_complaint,
-                    is_complete=bool(merged_symptoms and merged_tongue and merged_pulse),
-                    missing_info=f"还需要：{'、'.join(missing_items)}" if missing_items else "",
-                    user_refused=existing_si.user_refused or incoming_si.user_refused,
-                )
-                logger.debug(
-                    "diagnosis_symptoms_merged previous=%s current=%s total=%s",
-                    len(existing_si.symptoms), len(incoming_si.symptoms), len(updated_symptoms_info.symptoms),
-                )
+        if existing_si and isinstance(existing_si, SymptomsInfo) and existing_si.symptoms:
+            try:
+                new_si = _extract_symptoms_llm(state["user_input"], history_str)
+                if new_si.symptoms:
+                    # 合并症状（去重累加），舌象脉象保留已有值（无则用新值）
+                    merged_symptoms = list(set((existing_si.symptoms or []) + (new_si.symptoms or [])))
+                    merged_tongue = existing_si.tongue or new_si.tongue
+                    merged_pulse = existing_si.pulse or new_si.pulse
+                    merged_refused = existing_si.user_refused or new_si.user_refused
+                    missing_items = []
+                    if not merged_tongue:
+                        missing_items.append("舌象")
+                    if not merged_pulse:
+                        missing_items.append("脉象")
+                    is_complete = bool(merged_tongue and merged_pulse and len(merged_symptoms) > 0)
+                    missing_info = f"还需要：{'、'.join(missing_items)}" if missing_items else ""
+                    updated_symptoms_info = SymptomsInfo(
+                        symptoms=merged_symptoms,
+                        tongue=merged_tongue,
+                        pulse=merged_pulse,
+                        chief_complaint=new_si.chief_complaint or existing_si.chief_complaint,
+                        is_complete=is_complete,
+                        missing_info=missing_info,
+                        user_refused=merged_refused,
+                    )
+                    logger.debug(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 诊断前合并新症状: merged_symptoms={merged_symptoms}, tongue={merged_tongue}, pulse={merged_pulse}")
+                    # 检查是否新症状导致信息完整（之前不完整但合并后完整）
+                    if is_complete and not existing_si.is_complete:
+                        logger.debug(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 合并新症状后信息完整")
+            except Exception as e:
+                logger.debug(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 诊断前合并新症状失败: {e}")
 
     return {
         **state,
@@ -1005,28 +1025,28 @@ def supervisor_node(state: AgentState) -> AgentState:
 
 def extract_symptoms_node(state: AgentState) -> AgentState:
     logger.debug(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ====== 症状提取节点 ======")
-    
+
     recent_messages = state["messages"][-10:] if state["messages"] else []
     history_str = "\n".join([f"{m.type}: {m.content}" for m in recent_messages])
-    
+
     new_si = _extract_symptoms_llm(state["user_input"], history_str)
-    
+
     logger.debug(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 提取症状: symptoms={new_si.symptoms}, tongue={new_si.tongue}, pulse={new_si.pulse}, is_complete={new_si.is_complete}")
-    
+
     existing_si = state.get("symptoms_info")
-    
+
     logger.debug(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 现有症状信息: existing_si={existing_si}")
     if existing_si:
         logger.debug(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 现有: symptoms={existing_si.symptoms}, tongue={existing_si.tongue}, pulse={existing_si.pulse}")
-    
+
     if existing_si and isinstance(existing_si, SymptomsInfo):
         merged_symptoms = list(set((existing_si.symptoms or []) + (new_si.symptoms or [])))
         merged_tongue = existing_si.tongue or new_si.tongue
         merged_pulse = existing_si.pulse or new_si.pulse
         merged_refused = existing_si.user_refused or new_si.user_refused
-        
+
         logger.debug(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 合并后: symptoms={merged_symptoms}, tongue={merged_tongue}, pulse={merged_pulse}")
-        
+
         missing_items = []
         if not merged_tongue:
             missing_items.append("舌象")
@@ -1045,9 +1065,9 @@ def extract_symptoms_node(state: AgentState) -> AgentState:
         )
     else:
         symptoms_info = new_si
-    
+
     msg = f"已提取症状：{symptoms_info.symptoms}, 舌象={symptoms_info.tongue}, 脉象={symptoms_info.pulse}, 完整={symptoms_info.is_complete}"
-    
+
     return {
         **state,
         "symptoms_info": symptoms_info,
@@ -1057,9 +1077,9 @@ def extract_symptoms_node(state: AgentState) -> AgentState:
 
 def diagnosis_and_response_node(state: AgentState) -> AgentState:
     """合并：诊断 + 回复生成（单次 LLM 调用）"""
-    
+
     logger.debug(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ====== 诊断节点 ======")
-    
+
     si = state.get("symptoms_info")
     if not si or not isinstance(si, SymptomsInfo):
         logger.debug(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 缺少症状信息")
@@ -1069,9 +1089,9 @@ def diagnosis_and_response_node(state: AgentState) -> AgentState:
             "messages": state["messages"] + [AIMessage(content="缺少症状信息")],
             "is_diagnosed": True,
         }
-    
+
     logger.debug(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 开始诊断: symptoms={si.symptoms}, tongue={si.tongue}, pulse={si.pulse}")
-    
+
     diagnosis_result, kg_raw_result, response_text = _diagnose_and_respond(
         symptoms=si.symptoms,
         tongue=si.tongue,
@@ -1081,9 +1101,9 @@ def diagnosis_and_response_node(state: AgentState) -> AgentState:
         user_input=state["user_input"],
         mode=state["mode"],
     )
-    
+
     logger.debug(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 诊断完成: syndrome={diagnosis_result.syndrome}, prescription={diagnosis_result.prescription}")
-    
+
     return {
         **state,
         "kg_raw_result": kg_raw_result,
@@ -1119,25 +1139,25 @@ def _split_long_text(text: str, max_length: int = 80) -> list:
     text = _clean_text(text)
     if len(text) <= max_length:
         return [text]
-    
+
     sentences = re.split(r'(；|。|！|\?)', text)
     result = []
     current_line = ""
-    
+
     for i in range(0, len(sentences), 2):
         sentence = sentences[i]
         punctuation = sentences[i+1] if i+1 < len(sentences) else ""
-        
+
         if len(current_line) + len(sentence) + len(punctuation) <= max_length:
             current_line += sentence + punctuation
         else:
             if current_line:
                 result.append(current_line.strip())
             current_line = sentence + punctuation
-    
+
     if current_line:
         result.append(current_line.strip())
-    
+
     return [line for line in result if line]
 
 
@@ -1145,9 +1165,9 @@ def _clean_field_text(text: str) -> str:
     """清洗单个字段的文本，去除严重乱序和标点问题"""
     if not text:
         return ""
-    
+
     text = str(text).strip()
-    
+
     text = text.replace("；；", "；").replace(";;", "；")
     text = text.replace("、；", "；").replace("；、", "；")
     text = text.replace("，，", "，").replace(",,", "，")
@@ -1155,10 +1175,10 @@ def _clean_field_text(text: str) -> str:
     text = text.replace("；，", "，").replace(",；", "，")
     text = text.replace("、、", "、").replace(",,", "、")
     text = text.replace("  ", " ").replace("   ", " ")
-    
+
     if text.endswith("；") or text.endswith(",") or text.endswith("、"):
         text = text[:-1] + "。"
-    
+
     return text.strip()
 
 
@@ -1167,13 +1187,13 @@ def _format_herb_detail(herb: dict) -> str:
     lines = []
     name = herb.get("name", "未知中药")
     lines.append(f"📌 {name}")
-    
+
     aliases = herb.get("aliases") or herb.get("alias_text") or herb.get("alias")
     if aliases:
         aliases_str = _clean_field_text(str(aliases).strip())
         if aliases_str:
             lines.append(f"  别名：{aliases_str}")
-    
+
     effect_text = _clean_field_text(herb.get("effectText") or herb.get("effect_text") or "")
     if not effect_text:
         effects = herb.get("effects") or herb.get("effect")
@@ -1181,7 +1201,7 @@ def _format_herb_detail(herb: dict) -> str:
             effect_text = "、".join([_clean_field_text(str(e)) for e in effects if e])
         elif effects:
             effect_text = _clean_field_text(str(effects))
-    
+
     if effect_text:
         effect_lines = _split_long_text(effect_text, 60)
         for i, line in enumerate(effect_lines):
@@ -1189,7 +1209,7 @@ def _format_herb_detail(herb: dict) -> str:
                 lines.append(f"  功效：{line}")
             else:
                 lines.append(f"        {line}")
-    
+
     indication_text = _clean_field_text(herb.get("indicationText") or herb.get("indication_text") or "")
     if not indication_text:
         symptoms = herb.get("symptoms") or herb.get("indication")
@@ -1197,7 +1217,7 @@ def _format_herb_detail(herb: dict) -> str:
             indication_text = "、".join([_clean_field_text(str(s)) for s in symptoms if s])
         elif symptoms:
             indication_text = _clean_field_text(str(symptoms))
-    
+
     if indication_text:
         indication_lines = _split_long_text(indication_text, 60)
         for i, line in enumerate(indication_lines):
@@ -1205,18 +1225,18 @@ def _format_herb_detail(herb: dict) -> str:
                 lines.append(f"  主治：{line}")
             else:
                 lines.append(f"        {line}")
-    
+
     usage_text = _clean_field_text(herb.get("usageText") or herb.get("usage_text") or "")
     if not usage_text:
         usage = herb.get("usage") or herb.get("dosage")
         if usage:
             usage_text = _clean_field_text(str(usage))
-    
+
     if usage_text:
         usage_clean = _clean_field_text(usage_text)
         if usage_clean:
             lines.append(f"  用法：{usage_clean}")
-    
+
     nature_text = _clean_field_text(herb.get("natureTasteText") or herb.get("nature_taste_text") or "")
     if not nature_text:
         natures = herb.get("natures") or herb.get("property")
@@ -1224,12 +1244,12 @@ def _format_herb_detail(herb: dict) -> str:
             nature_text = "、".join([_clean_field_text(str(n)) for n in natures if n])
         elif natures:
             nature_text = _clean_field_text(str(natures))
-    
+
     if nature_text:
         nature_clean = _clean_field_text(nature_text)
         if nature_clean:
             lines.append(f"  性味：{nature_clean}")
-    
+
     meridian_text = _clean_field_text(herb.get("meridianText") or herb.get("meridian_text") or "")
     if not meridian_text:
         meridians = herb.get("meridians") or herb.get("meridian")
@@ -1237,12 +1257,12 @@ def _format_herb_detail(herb: dict) -> str:
             meridian_text = "、".join([_clean_field_text(str(m)) for m in meridians if m])
         elif meridians:
             meridian_text = _clean_field_text(str(meridians))
-    
+
     if meridian_text:
         meridian_clean = _clean_field_text(meridian_text)
         if meridian_clean:
             lines.append(f"  归经：{meridian_clean}")
-    
+
     category_text = _clean_field_text(herb.get("categoryText") or herb.get("category_text") or "")
     if not category_text:
         categories = herb.get("categories") or herb.get("category")
@@ -1250,12 +1270,12 @@ def _format_herb_detail(herb: dict) -> str:
             category_text = "、".join([_clean_field_text(str(c)) for c in categories if c])
         elif categories:
             category_text = _clean_field_text(str(categories))
-    
+
     if category_text:
         category_clean = _clean_field_text(category_text)
         if category_clean:
             lines.append(f"  分类：{category_clean}")
-    
+
     contraindication_text = _clean_field_text(herb.get("contraindicationText") or herb.get("contraindication_text") or "")
     if not contraindication_text:
         contraindications = herb.get("contraindications") or herb.get("contraindication")
@@ -1263,7 +1283,7 @@ def _format_herb_detail(herb: dict) -> str:
             contraindication_text = "；".join([_clean_field_text(str(c)) for c in contraindications if c])
         elif contraindications:
             contraindication_text = _clean_field_text(str(contraindications))
-    
+
     if contraindication_text:
         contraindication_lines = _split_long_text(contraindication_text, 60)
         for i, line in enumerate(contraindication_lines):
@@ -1271,7 +1291,7 @@ def _format_herb_detail(herb: dict) -> str:
                 lines.append(f"  禁忌：{line}")
             else:
                 lines.append(f"        {line}")
-    
+
     if herb.get("pairings"):
         pairings_str = []
         for p in herb["pairings"][:5]:
@@ -1284,7 +1304,7 @@ def _format_herb_detail(herb: dict) -> str:
             pairings_clean = "; ".join(pairings_str)
             if pairings_clean:
                 lines.append(f"  常用配伍：{pairings_clean}")
-    
+
     related = herb.get("relatedFormulas") or herb.get("related_formulas") or herb.get("used_in_formulas") or []
     if related:
         formula_names = []
@@ -1297,14 +1317,14 @@ def _format_herb_detail(herb: dict) -> str:
                 formula_names.append(_clean_field_text(str(f)))
         if formula_names:
             lines.append(f"  相关方剂：{', '.join(formula_names)}")
-    
+
     source_url = herb.get("sourceUrl") or herb.get("source_url")
     if source_url:
         lines.append(f"  来源：{source_url}")
-    
+
     if not effect_text and not indication_text and not contraindication_text:
         lines.append("  ⚠️ 该药在知识图谱中尚未完善详细信息，仅有关联方剂数据")
-    
+
     return "\n".join(lines)
 
 
@@ -1313,7 +1333,7 @@ def _format_formula_detail(formula: dict) -> str:
     lines = []
     name = formula.get("name", "未知方剂")
     lines.append(f"📌 {name}")
-    
+
     effects = formula.get("effects", [])
     if isinstance(effects, list):
         effects_str = "、".join(effects)
@@ -1321,7 +1341,7 @@ def _format_formula_detail(formula: dict) -> str:
         effects_str = str(effects)
     if effects_str:
         lines.append(f"  功效：{effects_str}")
-    
+
     indications = formula.get("indications", [])
     if isinstance(indications, list):
         indications_str = "、".join(indications)
@@ -1329,11 +1349,11 @@ def _format_formula_detail(formula: dict) -> str:
         indications_str = str(indications)
     if indications_str:
         lines.append(f"  主治：{indications_str}")
-    
+
     symptoms = formula.get("symptoms", [])
     if isinstance(symptoms, list) and symptoms:
         lines.append(f"  适用症状：{', '.join(symptoms[:10])}")
-    
+
     herbs = formula.get("herbs", [])
     if isinstance(herbs, list) and herbs:
         if isinstance(herbs[0], dict):
@@ -1341,22 +1361,22 @@ def _format_formula_detail(formula: dict) -> str:
             lines.append(f"  组成：{'; '.join(herb_strs)}")
         else:
             lines.append(f"  组成：{', '.join(herbs[:8])}")
-    
+
     usages = formula.get("usages", [])
     if isinstance(usages, list) and usages:
         lines.append(f"  用法：{', '.join(usages[:3])}")
-    
+
     contraindications = formula.get("contraindications", [])
     if isinstance(contraindications, list) and contraindications:
         lines.append(f"  禁忌：{', '.join(contraindications[:3])}")
-    
+
     sources = formula.get("sources", [])
     if isinstance(sources, list) and sources:
         lines.append(f"  出处：{', '.join(sources[:2])}")
-    
+
     if formula.get("sourceUrl"):
         lines.append(f"  链接：{formula['sourceUrl']}")
-    
+
     return "\n".join(lines)
 
 
@@ -1364,13 +1384,13 @@ def _refine_kg_response(user_input: str, raw_data: dict) -> str:
     """让LLM直接从知识图谱的原始JSON数据中提取信息并整理成清晰的中药/方剂介绍"""
     if not raw_data:
         return ""
-    
+
     import json
     raw_text = json.dumps(raw_data, ensure_ascii=False, indent=2)
-    
+
     if len(raw_text) > 5000:
         raw_text = raw_text[:5000] + "\n\n（数据过长，已截断）"
-    
+
     system_prompt = """你是中医药知识整理助手。你的任务是从知识图谱返回的原始JSON数据中提取信息，整理成清晰、规范的中医药介绍。
 
 【输入数据特点】
@@ -1429,7 +1449,7 @@ def _refine_kg_response(user_input: str, raw_data: dict) -> str:
 """
 
     from langchain_core.messages import SystemMessage, HumanMessage
-    
+
     messages = [
         SystemMessage(content=system_prompt),
         HumanMessage(content=f"用户查询：{user_input}\n\n知识图谱原始数据（JSON）：\n{raw_text}\n\n请整理并优化上述内容，确保信息清晰、准确、完整：")
@@ -1437,13 +1457,13 @@ def _refine_kg_response(user_input: str, raw_data: dict) -> str:
 
     response = _get_llm_32b().invoke(messages)
     refined_text = response.content if hasattr(response, 'content') else str(response)
-    
+
     return refined_text
 
 
 def custom_query_node(state: AgentState) -> AgentState:
     user_input = state["user_input"]
-    
+
     # 知识性/方法性问题检测：如果用户问的是"怎么测""什么是""怎么区分"等知识性问题
     # 跳过知识图谱查询，直接用LLM回答
     _knowledge_indicators = ["怎么测", "怎么量", "怎么观察", "怎么摸", "怎么判断",
@@ -1451,7 +1471,7 @@ def custom_query_node(state: AgentState) -> AgentState:
                              "怎么区分", "怎么辨别", "如何判断", "如何区分",
                              "功效是什么", "作用是什么", "有什么用", "怎么测舌", "怎么测脉"]
     _is_knowledge_question = any(kw in user_input for kw in _knowledge_indicators)
-    
+
     if _is_knowledge_question:
         scene = state.get("scene", "guide")
         try:
@@ -1479,12 +1499,12 @@ def custom_query_node(state: AgentState) -> AgentState:
             }
         except Exception as e:
             logger.debug(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 知识性问题LLM回答失败: {e}")
-    
+
     intent_info = _extract_query_target(user_input)
     keywords = intent_info.get("keywords", [])
     query_type = intent_info.get("query_type", "unknown")
     primary_keyword = keywords[0] if keywords and isinstance(keywords, list) else user_input
-    
+
     if query_type == "herb" and primary_keyword:
         result = get_herb_detail(name=primary_keyword)
         if result.get("success") and result.get("herb"):
@@ -1566,7 +1586,7 @@ def custom_query_node(state: AgentState) -> AgentState:
             "final_response": refined_text,
             "messages": state["messages"] + [AIMessage(content=refined_text)],
         }
-    
+
     if query_type == "formula" and primary_keyword:
         result = get_formula_detail(name=primary_keyword)
         if result.get("success") and result.get("formula"):
@@ -1649,7 +1669,7 @@ def custom_query_node(state: AgentState) -> AgentState:
             "final_response": refined_text,
             "messages": state["messages"] + [AIMessage(content=refined_text)],
         }
-    
+
     if query_type == "syndrome" and primary_keyword:
         result = search_formulas_by_effect(primary_keyword, limit=3)
         if result.get("formulas"):
@@ -1665,31 +1685,31 @@ def custom_query_node(state: AgentState) -> AgentState:
 - 使用清晰的标题和列表
 - 确保信息准确、专业
 """
-            
+
             from langchain_core.messages import SystemMessage, HumanMessage
-            
+
             messages = [
                 SystemMessage(content=system_prompt),
                 HumanMessage(content=f"请介绍与「{primary_keyword}」相关的方剂")
             ]
-            
+
             response = _get_llm_32b().invoke(messages)
             refined_text = response.content if hasattr(response, 'content') else str(response)
-            
+
             return {
                 **state,
                 "kg_raw_result": result,
                 "final_response": refined_text,
                 "messages": state["messages"] + [AIMessage(content=refined_text)],
             }
-    
+
     if query_type in ("symptom", "unknown") and primary_keyword:
         result = recommend_clinical_options(description=user_input, limit=3)
         if result.get("formulas"):
             response_lines = [f"关于「{user_input}」的临床推荐："]
             for f in result["formulas"][:3]:
                 response_lines.append(f"\n{_format_formula_detail(f)}")
-            
+
             related_herbs = result.get("related_herbs", [])
             if related_herbs:
                 response_lines.append(f"\n\n📚 相关中药：")
@@ -1700,17 +1720,17 @@ def custom_query_node(state: AgentState) -> AgentState:
                         response_lines.append(f"  · {hname}：{heffect}")
                     else:
                         response_lines.append(f"  · {hname}")
-            
+
             formatted_text = "\n".join(response_lines)
             refined_text = _refine_kg_response(user_input, formatted_text)
-            
+
             return {
                 **state,
                 "kg_raw_result": result,
                 "final_response": refined_text,
                 "messages": state["messages"] + [AIMessage(content=refined_text)],
             }
-    
+
     # 知识图谱未匹配到结果，使用LLM自身知识回答
     scene = state.get("scene", "guide")
     try:
@@ -1752,12 +1772,12 @@ def custom_query_node(state: AgentState) -> AgentState:
 def _format_case_summary(case: dict, index: int) -> str:
     """将原始医案数据格式化为Markdown格式的完整医案信息"""
     lines = []
-    
+
     # 标题
     title = case.get("title") or case.get("formulaName") or "未知医案"
     lines.append(f"### 第{index}个：{title}")
     lines.append("")
-    
+
     # 摘要（完整内容，不截断）
     summary = case.get("summary") or case.get("rawText") or ""
     if summary:
@@ -1771,7 +1791,7 @@ def _format_case_summary(case: dict, index: int) -> str:
                 summary = summary[:500] + "..."
         lines.append(f"**摘要：** {summary}")
         lines.append("")
-    
+
     # 详细信息
     details = []
     if case.get("doctors"):
@@ -1792,21 +1812,21 @@ def _format_case_summary(case: dict, index: int) -> str:
     if case.get("symptoms"):
         symptoms_str = '、'.join(case["symptoms"][:5]) if isinstance(case["symptoms"], list) else str(case["symptoms"])
         details.append(f"- **症状：** {symptoms_str}")
-    
+
     if details:
         lines.extend(details)
         lines.append("")
-    
+
     # 来源（Markdown链接，可直接点击）
     source_url = case.get("sourceUrl") or case.get("source_url") or ""
     if source_url:
         lines.append(f"**来源：** [点击查看原文]({source_url})")
-    
+
     # ID
     case_id = case.get("caseId") or case.get("case_id") or ""
     if case_id:
         lines.append(f"**ID：** {case_id}")
-    
+
     return "\n".join(lines)
 
 
@@ -1830,11 +1850,11 @@ def _format_formula_with_herbs(formula: dict) -> str:
 def medical_case_node(state: AgentState) -> AgentState:
     """医案检索（基于 neo4j_case 知识图谱）"""
     user_input = state["user_input"]
-    
+
     intent_info = _extract_query_target(user_input)
     keywords = intent_info.get("keywords", [user_input])
     primary_keyword = keywords[0] if keywords and isinstance(keywords, list) else user_input
-    
+
     case_query_type_map = {
         "formula": "formula",
         "syndrome": "syndrome",
@@ -1846,7 +1866,7 @@ def medical_case_node(state: AgentState) -> AgentState:
         intent_info.get("query_type", "unknown"),
         "auto"
     )
-    
+
     diagnosis = state.get("diagnosis_result")
     clinical_kwargs = {}
     if diagnosis:
@@ -1856,7 +1876,7 @@ def medical_case_node(state: AgentState) -> AgentState:
             clinical_kwargs["formula"] = diagnosis.prescription
         if hasattr(diagnosis, 'ingredients') and diagnosis.ingredients:
             clinical_kwargs["symptoms"] = diagnosis.ingredients[:3]
-    
+
     result = None
     if clinical_kwargs:
         result = search_medical_cases_by_clinical_options(
@@ -1865,14 +1885,14 @@ def medical_case_node(state: AgentState) -> AgentState:
             formula=clinical_kwargs.get("formula"),
             limit=5,
         )
-    
+
     if not result or not result.get("success") or not result.get("cases"):
         result = search_medical_cases(
             query=primary_keyword,
             query_type=case_query_type,
             limit=5,
         )
-    
+
     cases = []
     for item in result.get("cases", []):
         if item.get("cases"):
@@ -1881,10 +1901,10 @@ def medical_case_node(state: AgentState) -> AgentState:
                 cases.append(c)
         else:
             cases.append(item)
-    
+
     cases = cases[:5]
     recommended_formulas = result.get("recommended_formulas", [])[:3]
-    
+
     if case_query_type == "formula" and result.get("cases"):
         for item in result["cases"][:3]:
             if item.get("name") and item.get("herbs"):
@@ -1896,7 +1916,7 @@ def medical_case_node(state: AgentState) -> AgentState:
                     "herbs": [h.get("name", "") if isinstance(h, dict) else str(h) for h in item.get("herbs", [])[:10]],
                     "support": len(item.get("cases", []))
                 })
-    
+
     if not cases and not recommended_formulas:
         if not result.get("success"):
             response_text = (
@@ -1912,7 +1932,7 @@ def medical_case_node(state: AgentState) -> AgentState:
                 "final_response": response_text,
                 "messages": state["messages"] + [AIMessage(content=response_text)],
             }
-    
+
     # 构建回复：基于已有症状/证型/方剂的医案检索
     # 确定检索关键词：优先使用诊断信息，其次使用用户输入
     search_desc = user_input
@@ -1924,26 +1944,26 @@ def medical_case_node(state: AgentState) -> AgentState:
             desc_parts.append(diagnosis.prescription)
         if desc_parts:
             search_desc = '、'.join(desc_parts)
-    
+
     response_lines = [
         f"和「{search_desc}」相似的医案包括但不限于以下 {len(cases)} 个：",
         "",
         "（仅供学习、科研和辅助参考，不能替代执业医师诊疗）",
         "",
     ]
-    
+
     for i, case in enumerate(cases, 1):
         response_lines.append(_format_case_summary(case, i))
         response_lines.append("")
         response_lines.append("---")
         response_lines.append("")
-    
+
     # 移除最后一个分隔线
     if response_lines and response_lines[-1] == "" and len(response_lines) >= 2 and response_lines[-2] == "---":
         response_lines = response_lines[:-2]
-    
+
     response_text = "\n".join(response_lines)
-    
+
     return {
         **state,
         "kg_raw_result": result,
@@ -2013,7 +2033,7 @@ def department_inquiry_node(state: AgentState) -> AgentState:
     """处理用户挂号/科室咨询，基于已有症状由LLM推荐科室"""
     scene = state.get("scene", "guide")
     si = state.get("symptoms_info")
-    
+
     # 如果还没有症状信息，先从当前用户输入中提取（处理第一轮同时提供症状+挂号咨询的情况）
     if not si or not isinstance(si, SymptomsInfo) or not si.symptoms:
         try:
@@ -2024,7 +2044,7 @@ def department_inquiry_node(state: AgentState) -> AgentState:
                 logger.debug(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] department_inquiry 提取症状: {si.symptoms}")
         except Exception as e:
             logger.debug(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] department_inquiry 提取症状失败: {e}")
-    
+
     symptoms = si.symptoms if si and isinstance(si, SymptomsInfo) and si.symptoms else []
 
     # 构造已有症状信息
@@ -2166,7 +2186,6 @@ _SESSIONS = RedisSessionStore(ttl_seconds=int(os.getenv("AGENT_SESSION_TTL_SECON
 
 
 def _session_key(session_id: str, patient_id: str, scene: str) -> str:
-    """同名会话在不同患者或端侧绝不共享状态。"""
     return f"{scene}:{patient_id}:{session_id}"
 
 
@@ -2243,8 +2262,7 @@ def tcm_agent_stream_chat(session_id: str, patient_id: str, user_input: str, mod
         logger.debug(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ====== Agent 调用完成 ======")
         logger.debug(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] intent={result.get('intent')}")
     except Exception as e:
-        error_detail = traceback.format_exc()
-        logger.debug(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] tcm_agent_stream_chat error: {error_detail}")
+        logger.exception("agent_stream_failed")
         yield f"data: {json.dumps({'code': 500, 'data': {'status': 'error', 'response': f'处理失败：{str(e)}', 'finish': False}}, ensure_ascii=False)}\n\n"
         yield "data: [DONE]\n\n"
         return
@@ -2271,7 +2289,7 @@ def tcm_agent_stream_chat(session_id: str, patient_id: str, user_input: str, mod
             if not _is_real_followup:
                 try:
                     llm = _get_llm_32b()
-                    from langchain_core.messages import SystemMessage
+                    from langchain_core.messages import SystemMessage, HumanMessage
                     if scene == "guide":
                         sys_prompt = "你是一位温和、专业的中医健康助手。患者已完成预问诊诊断，现在提出了一个问题，请基于已有上下文友好回答。如果患者问的是如何测量舌象脉象等知识性问题，请详细指导。回答简洁明了。"
                     else:
@@ -2539,14 +2557,13 @@ def tcm_agent_chat(session_id: str, patient_id: str, user_input: str, mode: str 
     }
 
     logger.debug(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ====== 调用 Agent ======")
-    
+
     try:
         result = app.invoke(inputs, config)
         logger.debug(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ====== Agent 调用完成 ======")
         logger.debug(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] intent={result.get('intent')}, has_diagnosis={result.get('diagnosis_result') is not None}")
     except Exception as e:
-        error_detail = traceback.format_exc()
-        logger.debug(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] tcm_agent_chat error: {error_detail}")
+        logger.exception("agent_chat_failed")
         return {
             "status": "error",
             "response": "智能助手暂不可用，请稍后再试",
@@ -2556,13 +2573,13 @@ def tcm_agent_chat(session_id: str, patient_id: str, user_input: str, mode: str 
         si = result.get("symptoms_info")
         default_ask = "请提供患者症状信息，我来协助您辨证分析。" if scene == "doctor" else "请描述您的症状，我来帮您分析。"
         ask_q = result.get("ask_question") or default_ask
-        
+
         session_data = dict(result)
         session_data["last_access_time"] = time.time()
-        
+
         is_diagnosed = result.get("is_diagnosed", False) or existing_state.get("is_diagnosed", False)
         session_data["is_diagnosed"] = is_diagnosed
-        
+
         # 诊断完成后，如果患者提出新问题（非追问症状），用LLM正常回答
         if is_diagnosed:
             # 检查是否是真正的症状追问，还是患者在问其他问题
@@ -2586,7 +2603,7 @@ def tcm_agent_chat(session_id: str, patient_id: str, user_input: str, mode: str 
                     ask_q = response.content if hasattr(response, 'content') else str(response)
                 except Exception as e:
                     logger.debug(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 诊断后回答失败: {e}")
-            
+
             _SESSIONS[store_key] = session_data
             return {
                 "status": "done",
@@ -2608,18 +2625,18 @@ def tcm_agent_chat(session_id: str, patient_id: str, user_input: str, mode: str 
             "symptoms_info": si.dict() if isinstance(si, SymptomsInfo) else {},
             "finish": False,
         }
-    
+
     if result.get("final_response"):
         intent = result.get("intent", "")
         diagnosis = result.get("diagnosis_result")
         session_data = dict(result)
         session_data["last_access_time"] = time.time()
-        
+
         is_diagnosed = result.get("is_diagnosed", False) or existing_state.get("is_diagnosed", False)
         session_data["is_diagnosed"] = is_diagnosed
-        
+
         _SESSIONS[store_key] = session_data
-        
+
         if intent in ("custom_query", "medical_case"):
             return {
                 "status": "query_answer",
@@ -2641,33 +2658,33 @@ def tcm_agent_chat(session_id: str, patient_id: str, user_input: str, mode: str 
                 } if diagnosis else {},
                 "finish": True,
             }
-        
+
         if session_data.get("is_diagnosed"):
             return {
                 "status": "done",
                 "response": result["final_response"],
                 "finish": True,
             }
-        
+
         return {
             "status": "done",
             "response": result["final_response"],
             "finish": False,
         }
-    
+
     session_data = {
         "last_access_time": time.time(),
         "is_diagnosed": existing_state.get("is_diagnosed", False),
     }
     _SESSIONS[store_key] = session_data
-    
+
     if existing_state.get("is_diagnosed"):
         return {
             "status": "done",
             "response": "处理完成",
             "finish": True,
         }
-    
+
     return {
         "status": "done",
         "response": "处理完成",
@@ -2679,7 +2696,7 @@ if __name__ == "__main__":
     patient_profile = {
         "allergy_history": {"herbs": ["麻黄", "桂枝"]},
     }
-    
+
     result = tcm_agent_chat(
         session_id="test_001",
         patient_id="p001",

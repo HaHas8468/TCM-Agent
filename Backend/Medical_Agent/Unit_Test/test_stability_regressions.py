@@ -39,9 +39,9 @@ def test_sync_chat_does_not_shadow_human_message_before_message_creation():
 def test_diagnosis_follow_up_uses_algorithm_style_history_extraction_and_merge():
     source = (BACKEND / "traditional_medical_agent" / "tcm_agent.py").read_text(encoding="utf-8")
 
-    assert 'elif intent == "diagnosis":' in source
-    assert "incoming_si = _extract_symptoms_llm(state[\"user_input\"], history_str)" in source
-    assert "merged_symptoms = list(set((existing_si.symptoms or []) + (incoming_si.symptoms or [])))" in source
+    assert 'if intent == "diagnosis":' in source
+    assert "new_si = _extract_symptoms_llm(state[\"user_input\"], history_str)" in source
+    assert "merged_symptoms = list(set((existing_si.symptoms or []) + (new_si.symptoms or [])))" in source
     assert "对话历史：" in source
     assert "decision.user_explicit_stop or decision.user_refused or decision.force_diagnosis" in source
 
