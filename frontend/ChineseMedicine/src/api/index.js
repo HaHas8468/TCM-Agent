@@ -10,9 +10,6 @@ import {
 } from './mappers'
 import { createSseParser } from './sse-parser'
 
-// 与医生端保持一致的科室配置
-export const DEPARTMENT_OPTIONS = ['中医内科', '呼吸内科', '神经内科', '心血管内科', '消化内科', '骨伤科', '妇科', '儿科', '皮肤科', '肾病科', '泌尿外科', '内分泌科']
-
 // ============ 一、鉴权 ============
 
 // 1.1 患者注册

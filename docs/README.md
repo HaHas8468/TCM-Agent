@@ -8,9 +8,12 @@
 - [requirements/](requirements/)：完整功能需求、前端 PRD、Agent 内核需求与线上线下业务方案。
 - [testing/](testing/)：系统、接口和 Agent 回归测试用例与报告。
 - [design/](design/)：患者端视觉规范、医生端原型和界面说明。
-- [guides/](guides/)：后端、Agent 内核、Neo4j 图谱与参考工具说明。
+- [guides/](guides/)：后端、Agent 内核、Neo4j 图谱、部署与参考工具说明。
 
-生产部署、证书、备份和恢复统一参见[Linux Docker Compose 全栈部署指南](guides/deployment/linux-docker-compose.md)。
+部署文档：
+
+- [Linux Docker Compose 全栈部署指南](guides/deployment/linux-docker-compose.md)：在根目录使用 `compose.yaml` 一次启动前端、后端和数据服务。
+- [前后端分离前端部署指南](guides/deployment/frontend-only-docker-compose.md)：分别使用 `frontend/`、`frontend/ChineseMedicine/` 或 `frontend/DoctorBackgroundSystem/` 的 Compose 配置部署前端。
 
 ## 维护约定
 

@@ -119,7 +119,7 @@
 
 <script>
 	import { getCurrentUserProfile } from '../../config/user-profile'
-	import { getDepartments, getDoctorSlots, createOrder, DEPARTMENT_OPTIONS } from '../../api'
+	import { getDepartments, getDoctorSlots, createOrder } from '../../api'
 
 
 	const formatDate = (date) => {
@@ -152,10 +152,10 @@
 		},
 		computed: {
 			departments() {
-				const backendDepartments = this.doctors.map((item) => item.department)
 				return Array.from(
 					new Set(
-						[...DEPARTMENT_OPTIONS, ...backendDepartments]
+						this.doctors
+							.map((item) => item.department)
 							.map((item) => String(item || '').trim())
 							.filter(Boolean)
 					)
