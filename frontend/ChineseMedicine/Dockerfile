@@ -18,6 +18,7 @@ RUN mkdir -p /usr/share/nginx/html/static \
     && cp -a /tmp/patient-static/. /usr/share/nginx/html/static/ \
     && chmod -R a+rX /usr/share/nginx/html/static \
     && test -f /usr/share/nginx/html/static/logo.png \
-    && test -f /usr/share/nginx/html/static/img/people.svg
+    && test -f /usr/share/nginx/html/static/img/people.svg \
+    && test -f /usr/share/nginx/html/static/design-assets/icons/lucide/stethoscope.svg
 
 EXPOSE 8080
