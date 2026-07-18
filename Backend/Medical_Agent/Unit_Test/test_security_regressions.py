@@ -49,3 +49,5 @@ def test_case_write_is_limited_to_authenticated_doctors_and_uses_server_identity
     assert 'doctors=[{"name": doctor.name, "id": doctor.doctor_id}]' in body
     assert 'KG_ALLOW_CASE_WRITE=false' in env_example
     assert 'process.env.KG_ALLOW_CASE_WRITE === "true"' in kg_server
+    assert "_convert_entity_list(input_data.diseases)" in body
+    assert "_case_entities_to_kg" not in body

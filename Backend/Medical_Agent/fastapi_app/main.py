@@ -1437,11 +1437,11 @@ async def add_case_api(input_data: AddCaseInput, token_info: Dict[str, Any] = De
         # 录入人和关联医生必须由认证上下文决定，不能信任前端传值。
         author=doctor.name,
         channel=input_data.channel,
-        diseases=_case_entities_to_kg(input_data.diseases),
-        syndromes=_case_entities_to_kg(input_data.syndromes),
-        symptoms=_case_entities_to_kg(input_data.symptoms),
-        formulas=_case_entities_to_kg(input_data.formulas),
-        treatment_methods=_case_entities_to_kg(input_data.treatmentMethods),
+        diseases=_convert_entity_list(input_data.diseases),
+        syndromes=_convert_entity_list(input_data.syndromes),
+        symptoms=_convert_entity_list(input_data.symptoms),
+        formulas=_convert_entity_list(input_data.formulas),
+        treatment_methods=_convert_entity_list(input_data.treatmentMethods),
         doctors=[{"name": doctor.name, "id": doctor.doctor_id}],
     )
     if not result.get("success"):
