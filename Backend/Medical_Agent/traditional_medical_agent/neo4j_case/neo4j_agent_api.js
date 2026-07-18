@@ -167,7 +167,8 @@ const ENTITY_TYPES = Object.freeze({
   symptoms:         { label: "症状", rel: "表现症状", prefix: "SYMPTOM" },
   formulas:         { label: "方剂", rel: "使用方剂", prefix: "FORMULA" },
   treatmentMethods: { label: "治法", rel: "采用治法", prefix: "PRINCIPLE" },
-  doctors:          { label: "名医", rel: "关联名医", prefix: "DOCTOR" },
+  // 医生 ID 与业务系统一致，写医案时应复用已有医生节点，避免与全局 id 唯一约束冲突。
+  doctors:          { label: "名医", rel: "关联名医", prefix: "DOCTOR", matchById: true },
 });
 
 // 新增单个医案及其关联实体与关系
@@ -210,11 +211,17 @@ async function addCase(params = {}) {
   const blocks = [];
   for (const [key, cfg] of Object.entries(ENTITY_TYPES)) {
     if (!entityParams[key].length) continue;
+    const nodeMatch = cfg.matchById
+      ? `{id: ${key}_item.id}`
+      : `{name: ${key}_item.name}`;
+    const onCreate = cfg.matchById
+      ? `ON CREATE SET ${key}_node.name = ${key}_item.name`
+      : `ON CREATE SET ${key}_node.id = ${key}_item.id`;
     blocks.push(`
     WITH c
     UNWIND $${key} AS ${key}_item
-      MERGE (${key}_node:KGNode:${cfg.label} {name: ${key}_item.name})
-      ON CREATE SET ${key}_node.id = ${key}_item.id
+      MERGE (${key}_node:KGNode:${cfg.label} ${nodeMatch})
+      ${onCreate}
       MERGE (c)-[:${cfg.rel} {source_id: $sourceId}]->(${key}_node)`);
   }
   if (entityParams.channels.length) {

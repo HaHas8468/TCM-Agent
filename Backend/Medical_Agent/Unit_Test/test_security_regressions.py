@@ -58,6 +58,8 @@ def test_case_write_cypher_keeps_case_node_in_scope_between_entity_blocks():
 
     assert "WITH c\n    UNWIND $${key}" in source
     assert "WITH c\n    UNWIND $channels" in source
+    assert 'doctors:          { label: "名医", rel: "关联名医", prefix: "DOCTOR", matchById: true }' in source
+    assert "const nodeMatch = cfg.matchById" in source
 
 
 def test_kg_service_logs_rejected_graph_query_without_returning_details():
