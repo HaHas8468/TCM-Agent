@@ -75,3 +75,17 @@ def test_gateway_declares_limits_and_generic_exception_response():
     assert "Depends(limit_authenticated_write)" in source
     assert '"msg": "服务暂时不可用，请稍后再试"' in source
     assert 'Field(min_length=1, max_length=4000)' in source
+
+
+def test_patient_trace_uses_real_agent_summary_and_keeps_internal_details_private():
+    agent_source = (BACKEND / "traditional_medical_agent" / "tcm_agent.py").read_text(encoding="utf-8")
+    service_source = (BACKEND / "agent_service" / "main.py").read_text(encoding="utf-8")
+    patient_source = (BACKEND.parents[1] / "frontend" / "ChineseMedicine" / "src" / "pages" / "register" / "smart.vue").read_text(encoding="utf-8")
+
+    assert "def _build_public_trace" in agent_source
+    assert '"state": "completed"' in agent_source
+    assert '"知识图谱检索"' in agent_source
+    assert 'payload["trace"] = _build_public_trace(state)' in agent_source
+    assert '"state": "running"' in service_source
+    assert "yield f\"data: {json.dumps({'event': 'trace', 'trace': result['trace']}" in service_source
+    assert "trace.state === 'running'" in patient_source

@@ -127,7 +127,7 @@
 											<text class="agent-trace__label">{{ step.title }}</text>
 											<text class="agent-trace__detail">{{ step.detail }}</text>
 										</view>
-										<view v-for="(tool, toolIndex) in item.trace.tools || []" :key="`tool-${toolIndex}`" class="agent-trace__row agent-trace__row--tool">
+								<view v-for="(tool, toolIndex) in item.trace.tools || []" v-if="Array.isArray(item.trace.tools) && item.trace.tools.length" :key="`tool-${toolIndex}`" class="agent-trace__row agent-trace__row--tool">
 											<text class="agent-trace__label">工具：{{ tool.name }}（{{ tool.status }}）</text>
 											<text class="agent-trace__detail">{{ tool.detail }}</text>
 										</view>
@@ -479,23 +479,25 @@
 							const m = this.messages[msgIndex]
 							if (!m) return
 
-							// 首个 trace 事件仅表示已开始分析，仍应保持加载动画。
-							if (!(data && data.event === 'trace')) {
-								m.thinking = false
-							}
-
 							// 后端 SSE 数据可能为 {code, data:{...}} 或直接是 {status, response,...}，统一兼容
 							const inner = (data && typeof data === 'object' && data.data && typeof data.data === 'object')
 								? data.data
 								: data
-						const responseText = inner && (inner.response || inner.text)
-						const status = inner && inner.status
-						const diagnosis = inner && inner.diagnosis
-						if (inner && inner.trace) {
-							const isFirstTrace = !m.trace
-							m.trace = inner.trace
-							if (isFirstTrace) m.traceOpen = false
-						}
+							const trace = inner && inner.trace
+							const isRunningTrace = data && data.event === 'trace' && trace && trace.state === 'running'
+							if (!isRunningTrace) m.thinking = false
+							const responseText = inner && (inner.response || inner.text)
+							const status = inner && inner.status
+							const diagnosis = inner && inner.diagnosis
+							if (trace) {
+								const isFirstTrace = !m.trace
+								m.trace = {
+									...trace,
+									steps: Array.isArray(trace.steps) ? trace.steps : [],
+									tools: Array.isArray(trace.tools) ? trace.tools : []
+								}
+								if (isFirstTrace) m.traceOpen = false
+							}
 
 						if (responseText) {
 							// 每个流式 payload 的 response 都是增量文本片段，依次累加展示；

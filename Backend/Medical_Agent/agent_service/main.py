@@ -199,11 +199,15 @@ async def generate_stream_response(input_data: AgentInput) -> AsyncGenerator[str
     try:
         # 先推送一个可见的执行阶段，避免前端只能等同步 Agent 完成后一次性得到全部摘要。
         initial_trace = {
+            "state": "running",
             "steps": [{"title": "症状信息整理", "detail": "正在分析本次描述中的症状信息"}],
             "tools": [],
         }
         yield f"data: {json.dumps({'event': 'trace', 'trace': initial_trace}, ensure_ascii=False)}\n\n"
         result = await run_agent_chat(input_data)
+        if result.get("trace"):
+            # 同步 Agent 完成后先推送真实摘要，再发送回答正文，避免患者端长期停留在占位步骤。
+            yield f"data: {json.dumps({'event': 'trace', 'trace': result['trace']}, ensure_ascii=False)}\n\n"
         response_text = str(result.get("response", str(result)))
         chunks = [response_text[i:i + AGENT_STREAM_CHUNK_SIZE] for i in range(0, len(response_text), AGENT_STREAM_CHUNK_SIZE)]
         for chunk in chunks:

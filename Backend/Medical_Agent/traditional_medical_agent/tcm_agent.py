@@ -2189,6 +2189,57 @@ def _session_key(session_id: str, patient_id: str, scene: str) -> str:
     return f"{scene}:{patient_id}:{session_id}"
 
 
+def _build_public_trace(state: Dict[str, Any]) -> Dict[str, Any]:
+    """生成供患者端展示的执行摘要，不包含提示词、查询参数或底层异常。"""
+    intent = state.get("intent") or ""
+    symptoms_info = state.get("symptoms_info")
+    diagnosis = state.get("diagnosis_result")
+    kg_result = state.get("kg_raw_result") or {}
+
+    steps = [{"title": "症状信息整理", "detail": "已分析本次描述中的症状信息"}]
+    tools = []
+
+    if isinstance(symptoms_info, SymptomsInfo):
+        missing = []
+        if not symptoms_info.tongue:
+            missing.append("舌象")
+        if not symptoms_info.pulse:
+            missing.append("脉象")
+        if missing:
+            steps.append({"title": "信息完整性判断", "detail": f"还需补充{'、'.join(missing)}后可进一步辨证"})
+        else:
+            steps.append({"title": "信息完整性判断", "detail": "四诊信息已满足本次分析所需条件"})
+
+    if intent == "ask":
+        steps.append({"title": "问诊引导", "detail": "已生成下一步需补充的信息"})
+    elif intent == "diagnosis" or diagnosis:
+        available = []
+        if isinstance(kg_result, dict):
+            available = (kg_result.get("all_prescriptions_info") or {}).get("available") or []
+        if available:
+            tools.append({"name": "知识图谱检索", "status": "成功", "detail": f"找到 {len(available)} 个方剂参考"})
+        elif isinstance(kg_result, dict) and kg_result:
+            tools.append({"name": "知识图谱检索", "status": "未找到结果", "detail": "未找到可用的方剂参考"})
+        else:
+            tools.append({"name": "知识图谱检索", "status": "暂不可用", "detail": "本次未获得图谱参考结果"})
+        steps.append({"title": "辨证分析", "detail": "已结合症状信息与知识图谱参考生成建议"})
+    elif intent == "custom_query":
+        tools.append({"name": "知识图谱检索", "status": "完成" if kg_result else "未找到结果", "detail": "已完成中医药知识查询" if kg_result else "未找到相关知识条目"})
+        steps.append({"title": "结果整理", "detail": "已生成查询结果说明"})
+    elif intent == "medical_case":
+        tools.append({"name": "医案图谱检索", "status": "完成" if kg_result else "未找到结果", "detail": "已完成参考医案检索" if kg_result else "未找到相关参考医案"})
+        steps.append({"title": "结果整理", "detail": "已生成医案参考说明"})
+    else:
+        steps.append({"title": "回复生成", "detail": "已完成本次健康咨询回复"})
+
+    return {"state": "completed", "steps": steps, "tools": tools}
+
+
+def _with_public_trace(payload: Dict[str, Any], state: Dict[str, Any]) -> Dict[str, Any]:
+    payload["trace"] = _build_public_trace(state)
+    return payload
+
+
 app = build_graph()
 
 
@@ -2605,11 +2656,11 @@ def tcm_agent_chat(session_id: str, patient_id: str, user_input: str, mode: str 
                     logger.debug(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 诊断后回答失败: {e}")
 
             _SESSIONS[store_key] = session_data
-            return {
+            return _with_public_trace({
                 "status": "done",
                 "response": ask_q,
                 "finish": True,
-            }
+            }, result)
         _SESSIONS[store_key] = session_data
 
         logger.debug(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ====== 保存session状态 ======")
@@ -2619,12 +2670,12 @@ def tcm_agent_chat(session_id: str, patient_id: str, user_input: str, mode: str 
         else:
             logger.debug(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] symptoms_info为空或类型错误: {type(si)}")
 
-        return {
+        return _with_public_trace({
             "status": "asking",
             "response": ask_q,
             "symptoms_info": si.dict() if isinstance(si, SymptomsInfo) else {},
             "finish": False,
-        }
+        }, result)
 
     if result.get("final_response"):
         intent = result.get("intent", "")
@@ -2638,13 +2689,13 @@ def tcm_agent_chat(session_id: str, patient_id: str, user_input: str, mode: str 
         _SESSIONS[store_key] = session_data
 
         if intent in ("custom_query", "medical_case"):
-            return {
+            return _with_public_trace({
                 "status": "query_answer",
                 "response": result["final_response"],
                 "finish": False,
-            }
+            }, result)
         if diagnosis:
-            return {
+            return _with_public_trace({
                 "status": "diagnosed",
                 "response": result["final_response"],
                 "diagnosis_result": {
@@ -2657,20 +2708,20 @@ def tcm_agent_chat(session_id: str, patient_id: str, user_input: str, mode: str 
                     "precautions": diagnosis.precautions if diagnosis else "",
                 } if diagnosis else {},
                 "finish": True,
-            }
+            }, result)
 
         if session_data.get("is_diagnosed"):
-            return {
+            return _with_public_trace({
                 "status": "done",
                 "response": result["final_response"],
                 "finish": True,
-            }
+            }, result)
 
-        return {
+        return _with_public_trace({
             "status": "done",
             "response": result["final_response"],
             "finish": False,
-        }
+        }, result)
 
     session_data = {
         "last_access_time": time.time(),
@@ -2679,17 +2730,17 @@ def tcm_agent_chat(session_id: str, patient_id: str, user_input: str, mode: str 
     _SESSIONS[store_key] = session_data
 
     if existing_state.get("is_diagnosed"):
-        return {
+        return _with_public_trace({
             "status": "done",
             "response": "处理完成",
             "finish": True,
-        }
+        }, session_data)
 
-    return {
+    return _with_public_trace({
         "status": "done",
         "response": "处理完成",
         "finish": False,
-    }
+    }, session_data)
 
 
 if __name__ == "__main__":
