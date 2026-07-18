@@ -562,6 +562,33 @@ def _extract_symptoms_llm(user_input: str, history_str: str) -> SymptomsInfo:
     )
 
 
+def _merge_symptom_lists(*symptom_lists: List[str]) -> List[str]:
+    """按首次出现顺序去重，避免 set() 导致每次查询顺序不同。"""
+    return list(dict.fromkeys(
+        symptom.strip()
+        for symptoms in symptom_lists
+        for symptom in (symptoms or [])
+        if symptom and symptom.strip()
+    ))
+
+
+def _merge_symptoms_info(existing: SymptomsInfo, incoming: SymptomsInfo) -> SymptomsInfo:
+    """合并同一病例的补充信息；既有四诊不被后续模型结果覆盖。"""
+    symptoms = _merge_symptom_lists(existing.symptoms, incoming.symptoms)
+    tongue = existing.tongue or incoming.tongue
+    pulse = existing.pulse or incoming.pulse
+    missing = [label for label, value in (("舌象", tongue), ("脉象", pulse)) if not value]
+    return SymptomsInfo(
+        symptoms=symptoms,
+        tongue=tongue,
+        pulse=pulse,
+        chief_complaint=incoming.chief_complaint or existing.chief_complaint,
+        is_complete=bool(symptoms and tongue and pulse),
+        missing_info=f"还需要：{'、'.join(missing)}" if missing else "",
+        user_refused=existing.user_refused or incoming.user_refused,
+    )
+
+
 def _diagnose_and_respond(
     symptoms: List[str],
     tongue: Optional[str],
@@ -999,6 +1026,19 @@ def supervisor_node(state: AgentState) -> AgentState:
                             f"已了解您有{symptoms_str}等症状。为了更准确地辨证，还需要您提供脉象信息。"
                             "请自己或请家人帮忙摸脉，描述大致感受（如跳得快还是慢、轻按还是重按才摸到等）。"
                         )
+
+    # 已完成辨证后，医生再次补充本病例症状时，合并经当前原文校验的事实后重新辨证。
+    # 仅对 diagnosis 意图生效，知识问答、解释、医案检索不会污染病例状态。
+    elif intent == "diagnosis":
+        existing_si = state.get("symptoms_info")
+        if isinstance(existing_si, SymptomsInfo) and existing_si.symptoms:
+            incoming_si = _extract_symptoms_llm(state["user_input"], history_str)
+            if incoming_si.symptoms:
+                updated_symptoms_info = _merge_symptoms_info(existing_si, incoming_si)
+                logger.debug(
+                    "diagnosis_symptoms_merged previous=%s current=%s total=%s",
+                    len(existing_si.symptoms), len(incoming_si.symptoms), len(updated_symptoms_info.symptoms),
+                )
 
     return {
         **state,
