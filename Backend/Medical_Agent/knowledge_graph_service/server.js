@@ -75,6 +75,13 @@ async function handleQuery(request, response, graph, isCaseGraph) {
     try {
       const result = await graph.runAgentQuery(action, params);
       if (!result || result.ok !== true) {
+        // 图谱模块会将底层异常转换为 { ok: false, error }；记录摘要供运维定位，
+        // 不向调用方泄露数据库连接或查询细节。
+        console.error("kg_query_rejected", {
+          source: isCaseGraph ? "case" : "main",
+          action,
+          error: typeof result?.error === "string" ? result.error.slice(0, 300) : "unknown",
+        });
         sendJson(response, 502, { ok: false, error: "query_failed" });
         return;
       }

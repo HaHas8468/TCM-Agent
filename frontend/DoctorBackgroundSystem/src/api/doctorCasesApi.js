@@ -39,6 +39,12 @@ function normalizeTextList(value) {
     .filter(Boolean)
 }
 
+function assignIfPresent(target, key, value) {
+  if (Array.isArray(value) ? value.length : normalizeText(value)) {
+    target[key] = value
+  }
+}
+
 function hasPath(path) {
   return Boolean(normalizeText(path))
 }
@@ -231,18 +237,23 @@ export function buildKnowledgeCasePayload(entry = {}, options = {}) {
       ]
     : []
 
-  return {
+  const payload = {
     title: normalizedEntry.title,
-    summary: normalizedEntry.summary,
-    rawText: normalizedEntry.content,
     publishDate: normalizedEntry.publishedAt,
-    diseases: normalizedEntry.diseases.join(', '),
-    syndromes: normalizedEntry.syndromes,
-    symptoms: normalizedEntry.symptoms,
-    formulas: normalizedEntry.formulas,
-    treatmentMethods: normalizedEntry.treatment,
     doctors
   }
+
+  // 后端的可选文本字段若传空字符串仍会触发非空校验；未填写时应直接省略。
+  assignIfPresent(payload, 'summary', normalizedEntry.summary)
+  assignIfPresent(payload, 'rawText', normalizedEntry.content)
+  assignIfPresent(payload, 'sourceUrl', normalizedEntry.sourceUrl)
+  assignIfPresent(payload, 'diseases', normalizedEntry.diseases)
+  assignIfPresent(payload, 'syndromes', normalizedEntry.syndromes)
+  assignIfPresent(payload, 'symptoms', normalizedEntry.symptoms)
+  assignIfPresent(payload, 'formulas', normalizedEntry.formulas)
+  assignIfPresent(payload, 'treatmentMethods', normalizedEntry.treatment)
+
+  return payload
 }
 
 function normalizeKnowledgeCaseListResponse(payload) {
