@@ -1,0 +1,13 @@
+services:
+  frontend:
+    build:
+      context: ..
+      dockerfile: frontend/Dockerfile
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:?请通过 .env 设置后端 API 地址}
+    image: tcm-agent-frontend:latest
+    container_name: tcm-agent-frontend
+    restart: unless-stopped
+    ports:
+      - "${PATIENT_PORT:-8080}:8080"
+      - "${DOCTOR_PORT:-3000}:3000"
