@@ -20,6 +20,18 @@ def test_order_writes_use_resource_authorization():
         assert "require_order_access" in body
 
 
+def test_finished_order_stores_therapy_in_its_dedicated_record_field_and_reads_legacy_records():
+    source = (BACKEND / "fastapi_app" / "main.py").read_text(encoding="utf-8")
+    finish_start = source.index("async def finish_order")
+    detail_start = source.index("async def get_order_detail")
+    finish_body = source[finish_start:detail_start]
+    detail_body = source[detail_start:]
+
+    assert "treatment_principle=therapy" in finish_body
+    assert "legacy_therapy" in detail_body
+    assert "'treatment_principle': treatment_principle" in detail_body
+
+
 def test_neo4j_scripts_have_no_embedded_credentials():
     for relative in (
         "traditional_medical_agent/neo4j_main/knowledge_graph_query.js",

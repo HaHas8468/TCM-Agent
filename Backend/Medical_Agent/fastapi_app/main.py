@@ -952,17 +952,19 @@ async def finish_order(order_id: str, input_data: FinishOrderInput, token_info: 
         order.prescription = input_data.prescription
         order.ingredients = input_data.ingredients
         order.advice = input_data.advice
+        therapy = input_data.therapy or ""
         record_id = f'R{datetime.now().strftime("%Y%m%d%H%M%S")}{uuid.uuid4().hex[:8]}'
         record = ApiClinicRecord(
             record_id=record_id,
             patient_id=order.patient_id,
             doctor_id=order.doctor_id,
             order_id=order.id,
-            chief_complaint=input_data.therapy or order.chief_complaint or "",
+            chief_complaint=order.chief_complaint or "",
             history_of_present_illness=input_data.precautions or order.present_illness or "",
             tongue=order.tongue or "",
             pulse=order.pulse or "",
             zheng_type=input_data.syndrome,
+            treatment_principle=therapy,
             prescription=input_data.prescription,
             ingredients=input_data.ingredients,
             advice=input_data.advice
@@ -1220,6 +1222,15 @@ async def get_order_detail(order_id: str, token_info: Dict[str, Any] = Depends(r
     
     patient = db.query(ApiPatient).filter(ApiPatient.id == order.patient_id).first()
     doctor = db.query(ApiDoctor).filter(ApiDoctor.id == order.doctor_id).first()
+    record = db.query(ApiClinicRecord).filter(ApiClinicRecord.order_id == order.id).order_by(
+        ApiClinicRecord.visit_date.desc(), ApiClinicRecord.id.desc()
+    ).first()
+    # 兼容旧版本：旧逻辑把疗法错误写入 chief_complaint。仅当它不同于订单主诉时回退，
+    # 新记录始终优先使用 treatment_principle。
+    legacy_therapy = ""
+    if record and record.chief_complaint and record.chief_complaint != (order.chief_complaint or ""):
+        legacy_therapy = record.chief_complaint
+    treatment_principle = (record.treatment_principle if record else "") or legacy_therapy
     
     data = {
         'order_id': order.order_id,
@@ -1238,6 +1249,8 @@ async def get_order_detail(order_id: str, token_info: Dict[str, Any] = Depends(r
         'tongue': order.tongue or "",
         'pulse': order.pulse or "",
         'syndrome': order.syndrome or "",
+        'treatment_principle': treatment_principle,
+        'therapy': treatment_principle,
         'prescription': order.prescription or "",
         'ingredients': order.ingredients or [],
         'advice': order.advice or "",

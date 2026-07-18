@@ -143,7 +143,7 @@ export function mapOrderDetail(data = {}, ctx = {}) {
     advice,
     doctorAdvice: advice.join('；'),
     syndrome: data.syndrome || '',
-    treatmentPrinciple: data.treatment_principle || '',
+    treatmentPrinciple: data.treatment_principle || data.therapy || '',
     prescription: data.prescription || '',
     ingredients: Array.isArray(data.ingredients) ? data.ingredients.filter(Boolean) : [],
     tongue: data.tongue || '',
