@@ -92,7 +92,10 @@ services:
     logging: *default-logging
 
   mysql:
-    image: mysql:8.4
+    build:
+      context: ./Backend/Medical_Agent
+      dockerfile: docker/mysql/Dockerfile
+    image: tcm-agent-mysql:local
     env_file: ${TCM_ENV_FILE:-.env}
     environment:
       MYSQL_DATABASE: ${MYSQL_DB}
@@ -102,7 +105,6 @@ services:
       TZ: ${TZ:-Asia/Shanghai}
     volumes:
       - mysql-data:/var/lib/mysql
-      - ./Backend/Medical_Agent/scripts/init_mysql.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
     restart: unless-stopped
     mem_limit: ${MYSQL_MEMORY_LIMIT:-768m}
     healthcheck:

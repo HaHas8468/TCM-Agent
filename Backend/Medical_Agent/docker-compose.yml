@@ -64,7 +64,10 @@ services:
     networks: [internal]
 
   mysql:
-    image: mysql:8.4
+    build:
+      context: .
+      dockerfile: docker/mysql/Dockerfile
+    image: tcm-agent-mysql:local
     env_file: .env
     environment:
       MYSQL_DATABASE: ${MYSQL_DB}
@@ -73,7 +76,6 @@ services:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
     volumes:
       - mysql-data:/var/lib/mysql
-      - ./scripts/init_mysql.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "mysqladmin ping -h localhost -p$$MYSQL_ROOT_PASSWORD"]
       interval: 10s
