@@ -7,6 +7,7 @@ import {
   resolveDoctorDepartment,
   resolveDoctorShift
 } from '../../../api/doctorProfileApi'
+import { getDoctorSchedules, updateDoctorSchedule } from '../../../api/doctorScheduleApi'
 import settingsEmptyImage from '../../../assets/empty-states/settings.png'
 
 const props = defineProps({
@@ -21,6 +22,10 @@ const props = defineProps({
   departmentOptions: {
     type: Array,
     default: () => []
+  },
+  authToken: {
+    type: String,
+    default: ''
   }
 })
 
@@ -29,6 +34,10 @@ const emit = defineEmits(['save-profile', 'logout'])
 const activeSection = ref('')
 const profileError = ref('')
 const profileSaving = ref(false)
+const scheduleLoading = ref(false)
+const scheduleError = ref('')
+const scheduleDays = ref([])
+const scheduleUpdatingKey = ref('')
 const shiftOptions = doctorShiftOptions
 const mergedDepartmentOptions = computed(() => {
   const profile = props.settings.profile || {}
@@ -87,13 +96,48 @@ function syncProfileForm() {
   profileForm.confirmPassword = ''
 }
 
-function selectSection(section) {
+async function loadSchedules() {
+  if (!props.authToken) {
+    scheduleError.value = '当前登录状态已失效，请重新登录后再查看排班。'
+    return
+  }
+  scheduleLoading.value = true
+  scheduleError.value = ''
+  try {
+    const result = await getDoctorSchedules(props.authToken, 30)
+    scheduleDays.value = Array.isArray(result?.days) ? result.days : []
+  } catch (error) {
+    scheduleError.value = error?.message || '排班加载失败，请稍后重试。'
+  } finally {
+    scheduleLoading.value = false
+  }
+}
+
+async function changeSchedule(day, item) {
+  const action = item.status === 'closed' ? 'reopen' : 'close'
+  const key = `${day.date}-${item.period}`
+  scheduleUpdatingKey.value = key
+  scheduleError.value = ''
+  try {
+    await updateDoctorSchedule(props.authToken, day.date, item.period, action)
+    await loadSchedules()
+  } catch (error) {
+    scheduleError.value = error?.message || '排班更新失败，请稍后重试。'
+  } finally {
+    scheduleUpdatingKey.value = ''
+  }
+}
+
+async function selectSection(section) {
   activeSection.value = section
   profileError.value = ''
   profileSaving.value = false
 
   if (section === 'profile') {
     syncProfileForm()
+  }
+  if (section === 'schedule') {
+    await loadSchedules()
   }
 }
 
@@ -153,6 +197,15 @@ function saveProfile() {
         个人资料
       </button>
 
+      <button
+        type="button"
+        class="settings-menu__item"
+        :class="{ 'settings-menu__item--active': activeSection === 'schedule' }"
+        @click="selectSection('schedule')"
+      >
+        排班管理
+      </button>
+
       <span class="settings-menu__divider"></span>
 
       <button type="button" class="settings-menu__item settings-menu__item--danger" @click="emit('logout')">
@@ -167,7 +220,7 @@ function saveProfile() {
         <span>可维护个人资料，包括电话和密码修改。</span>
       </div>
 
-      <div v-else class="settings-panel">
+      <div v-else-if="activeSection === 'profile'" class="settings-panel">
         <header class="settings-panel__header">
           <h3>个人资料</h3>
         </header>
@@ -237,6 +290,40 @@ function saveProfile() {
           <button type="button" class="primary-button" :disabled="profileSaving" @click="saveProfile">
             {{ profileSaving ? '保存中...' : '保存修改' }}
           </button>
+        </div>
+      </div>
+
+      <div v-else class="settings-panel">
+        <header class="settings-panel__header">
+          <h3>未来 30 天排班</h3>
+          <p class="schedule-tip">关闭时段后将停止新患者预约，已预约患者不受影响。</p>
+        </header>
+
+        <p v-if="scheduleError" class="settings-panel__error">{{ scheduleError }}</p>
+        <div v-else-if="scheduleLoading" class="schedule-empty">正在加载排班…</div>
+        <div v-else class="schedule-list">
+          <article v-for="day in scheduleDays" :key="day.date" class="schedule-day">
+            <header>
+              <strong>{{ day.date }} {{ day.weekday }}</strong>
+              <span v-if="!day.periods?.length">非出诊日</span>
+            </header>
+            <div v-if="day.periods?.length" class="schedule-periods">
+              <div v-for="item in day.periods" :key="item.period" class="schedule-period">
+                <div>
+                  <strong>{{ item.label }} {{ item.start_time }}–{{ item.end_time }}</strong>
+                  <span>{{ item.status === 'closed' ? '已停诊' : `可预约 ${item.available_slots} 个，已预约 ${item.booked_count} 个` }}</span>
+                </div>
+                <button
+                  type="button"
+                  class="ghost-button"
+                  :disabled="scheduleUpdatingKey === `${day.date}-${item.period}`"
+                  @click="changeSchedule(day, item)"
+                >
+                  {{ scheduleUpdatingKey === `${day.date}-${item.period}` ? '处理中…' : (item.status === 'closed' ? '恢复出诊' : '停诊') }}
+                </button>
+              </div>
+            </div>
+          </article>
         </div>
       </div>
     </section>
@@ -364,6 +451,66 @@ function saveProfile() {
   margin: 0;
   color: var(--brand-deep);
   font-size: 26px;
+}
+
+.schedule-tip {
+  margin: 10px 0 0;
+  color: var(--text-subtle);
+}
+
+.schedule-list {
+  display: grid;
+  gap: 12px;
+  max-height: 640px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.schedule-day {
+  display: grid;
+  gap: 10px;
+  padding: 16px;
+  border: 1px solid var(--border-soft);
+  border-radius: 14px;
+  background: rgba(248, 251, 249, 0.8);
+}
+
+.schedule-day > header,
+.schedule-period,
+.schedule-period > div {
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.schedule-day > header span,
+.schedule-period span {
+  color: var(--text-subtle);
+  font-size: 14px;
+}
+
+.schedule-periods {
+  display: grid;
+  gap: 8px;
+}
+
+.schedule-period {
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: #fff;
+}
+
+.schedule-period > div {
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.schedule-empty {
+  padding: 48px 0;
+  color: var(--text-subtle);
+  text-align: center;
 }
 
 .settings-form {

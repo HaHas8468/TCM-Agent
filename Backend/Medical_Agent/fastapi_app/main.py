@@ -7,8 +7,9 @@ import re
 import json
 import psutil
 from contextvars import ContextVar
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date as DateValue
 from typing import Annotated, Optional, List, Dict, Any, Union
+from zoneinfo import ZoneInfo
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "traditional_medical_agent"))
@@ -19,10 +20,10 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import create_engine, Column, Integer, String, Text, Date, DateTime, DECIMAL, JSON, Boolean, ForeignKey, text
+from sqlalchemy import create_engine, Column, Integer, String, Text, Date, DateTime, DECIMAL, JSON, Boolean, ForeignKey, text, UniqueConstraint
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session, relationship
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 from dotenv import load_dotenv
 
 from .remote_agent_client import remote_agent_client
@@ -70,6 +71,9 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 request_db_sessions: ContextVar[Optional[List[Session]]] = ContextVar("request_db_sessions", default=None)
 
 Base = declarative_base()
+SCHEDULE_TIMEZONE = ZoneInfo("Asia/Shanghai")
+SCHEDULE_DAYS = 30
+SLOT_INTERVAL_MINUTES = 30
 
 
 class ApiDepartment(Base):
@@ -210,6 +214,34 @@ class ApiSchedule(Base):
     created_at = Column(DateTime, default=datetime.now)
 
 
+class ApiScheduleOverride(Base):
+    """医生手动停诊记录，独立于自动生成的排班，避免规则刷新后被覆盖。"""
+    __tablename__ = 'api_schedule_override'
+    __table_args__ = (UniqueConstraint('doctor_id', 'date', 'period', name='uq_schedule_override_doctor_date_period'),)
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    doctor_id = Column(Integer, ForeignKey('api_doctor.id'), nullable=False)
+    date = Column(Date, nullable=False)
+    period = Column(String(10), nullable=False)  # morning / afternoon
+    status = Column(String(20), nullable=False, default='closed')
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+
+class ApiBookingSlot(Base):
+    """预约时段占位表，数据库唯一约束是并发防重复挂号的最终保障。"""
+    __tablename__ = 'api_booking_slot'
+    __table_args__ = (UniqueConstraint('doctor_id', 'date', 'time', name='uq_booking_slot_doctor_date_time'),)
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    doctor_id = Column(Integer, ForeignKey('api_doctor.id'), nullable=False)
+    schedule_id = Column(Integer, ForeignKey('api_schedule.id'), nullable=False)
+    order_id = Column(Integer, ForeignKey('api_order.id'), nullable=False, unique=True)
+    date = Column(Date, nullable=False)
+    time = Column(String(20), nullable=False)
+    created_at = Column(DateTime, default=datetime.now)
+
+
 def get_db():
     db = SessionLocal()
     sessions = request_db_sessions.get()
@@ -249,6 +281,180 @@ def schedule_slot_times(schedule: ApiSchedule, interval_minutes: int = 30) -> Li
         f"{minute // 60:02d}:{minute % 60:02d}"
         for minute in range(start_minutes, end_minutes, interval_minutes)
     ]
+
+
+WEEKDAY_NAMES = {"一": 0, "二": 1, "三": 2, "四": 3, "五": 4, "六": 5, "日": 6, "天": 6}
+PERIOD_CONFIG = (("morning", "上午", 0, 12 * 60), ("afternoon", "下午", 14 * 60, 24 * 60))
+
+
+def schedule_now() -> datetime:
+    return datetime.now(SCHEDULE_TIMEZONE)
+
+
+def parse_duty_time(value: str) -> Dict[str, Any]:
+    """解析前端允许保存的门诊时间，例如“周一至周五 8:00-17:00”。"""
+    normalized = str(value or "").strip().replace("：", ":").replace("－", "-").replace("—", "-")
+    matched = re.fullmatch(r"周([一二三四五六日天])至周([一二三四五六日天])\s*(\d{1,2}:\d{2})\s*-\s*(\d{1,2}:\d{2})", normalized)
+    if not matched:
+        raise ValueError("门诊时间格式应为“周一至周五 8:00-17:00”")
+
+    start_weekday, end_weekday = WEEKDAY_NAMES[matched.group(1)], WEEKDAY_NAMES[matched.group(2)]
+    start_minutes = schedule_time_to_minutes(matched.group(3))
+    end_minutes = schedule_time_to_minutes(matched.group(4))
+    if end_minutes <= start_minutes:
+        raise ValueError("门诊结束时间必须晚于开始时间")
+
+    weekdays = set()
+    weekday = start_weekday
+    while True:
+        weekdays.add(weekday)
+        if weekday == end_weekday:
+            break
+        weekday = (weekday + 1) % 7
+    return {"weekdays": weekdays, "start": start_minutes, "end": end_minutes, "display": normalized}
+
+
+def minutes_to_time(value: int) -> str:
+    return f"{value // 60:02d}:{value % 60:02d}"
+
+
+def duty_periods_for_date(duty_time: str, target_date: DateValue) -> List[Dict[str, str]]:
+    rule = parse_duty_time(duty_time)
+    if target_date.weekday() not in rule["weekdays"]:
+        return []
+
+    periods = []
+    for key, label, lower_bound, upper_bound in PERIOD_CONFIG:
+        start = max(rule["start"], lower_bound)
+        end = min(rule["end"], upper_bound)
+        if end - start >= SLOT_INTERVAL_MINUTES:
+            periods.append({"key": key, "label": label, "start_time": minutes_to_time(start), "end_time": minutes_to_time(end)})
+    return periods
+
+
+def period_key_from_schedule(schedule: ApiSchedule) -> str:
+    return "morning" if schedule.morning_afternoon == "上午" else "afternoon"
+
+
+def occupied_slot_times(db: Session, doctor_id: int, target_date: DateValue) -> set:
+    """新旧订单均纳入占用判断，迁移前的历史数据也不会重新放号。"""
+    booked = {
+        value[0]
+        for value in db.query(ApiBookingSlot.time).filter(
+            ApiBookingSlot.doctor_id == doctor_id,
+            ApiBookingSlot.date == target_date,
+        ).all()
+    }
+    booked.update(
+        value[0]
+        for value in db.query(ApiOrder.time).filter(
+            ApiOrder.doctor_id == doctor_id,
+            ApiOrder.date == target_date,
+            ApiOrder.time.isnot(None),
+            ApiOrder.status != 'cancelled',
+        ).all()
+    )
+    return booked
+
+
+def update_schedule_available_count(db: Session, schedule: ApiSchedule) -> int:
+    if schedule.status != 'available':
+        schedule.available_slots = 0
+        return 0
+    occupied = occupied_slot_times(db, schedule.doctor_id, schedule.date)
+    available = len([slot for slot in schedule_slot_times(schedule, SLOT_INTERVAL_MINUTES) if slot not in occupied])
+    schedule.total_slots = len(schedule_slot_times(schedule, SLOT_INTERVAL_MINUTES))
+    schedule.available_slots = available
+    return available
+
+
+def ensure_doctor_schedules(db: Session, doctor: ApiDoctor, start_date: Optional[DateValue] = None, days: int = SCHEDULE_DAYS) -> int:
+    """根据工作时间补齐排班；已有排班及手动停诊均被保留，调用可重复执行。"""
+    start_date = start_date or schedule_now().date()
+    try:
+        parse_duty_time(doctor.duty_time or "")
+    except ValueError:
+        logger.warning("skip_schedule_generation doctor_id=%s invalid_duty_time=%r", doctor.doctor_id, doctor.duty_time)
+        return 0
+
+    end_date = start_date + timedelta(days=max(days, 1) - 1)
+    overrides = {
+        (item.date, item.period): item
+        for item in db.query(ApiScheduleOverride).filter(
+            ApiScheduleOverride.doctor_id == doctor.id,
+            ApiScheduleOverride.date >= start_date,
+            ApiScheduleOverride.date <= end_date,
+        ).all()
+    }
+    existing = {
+        (item.date, period_key_from_schedule(item)): item
+        for item in db.query(ApiSchedule).filter(
+            ApiSchedule.doctor_id == doctor.id,
+            ApiSchedule.date >= start_date,
+            ApiSchedule.date <= end_date,
+        ).all()
+    }
+    created = 0
+    for offset in range(days):
+        target_date = start_date + timedelta(days=offset)
+        for period in duty_periods_for_date(doctor.duty_time or "", target_date):
+            key = (target_date, period["key"])
+            schedule = existing.get(key)
+            is_closed = key in overrides
+            if schedule is None:
+                schedule = ApiSchedule(
+                    schedule_id=f"SCH_AUTO_{doctor.id}_{target_date.strftime('%Y%m%d')}_{period['key']}",
+                    doctor_id=doctor.id,
+                    department_id=doctor.department_id,
+                    date=target_date,
+                    start_time=period["start_time"],
+                    end_time=period["end_time"],
+                    morning_afternoon=period["label"],
+                    status='closed' if is_closed else 'available',
+                )
+                db.add(schedule)
+                existing[key] = schedule
+                created += 1
+            if is_closed:
+                schedule.status = 'closed'
+                schedule.available_slots = 0
+            else:
+                # 初始化 SQL 中的演示排班可能与医生的实际下班时间不一致；无预约时可安全校正。
+                if not occupied_slot_times(db, doctor.id, target_date):
+                    schedule.department_id = doctor.department_id
+                    schedule.start_time = period["start_time"]
+                    schedule.end_time = period["end_time"]
+                    schedule.morning_afternoon = period["label"]
+                    schedule.status = 'available'
+                update_schedule_available_count(db, schedule)
+    return created
+
+
+def ensure_upcoming_schedules(db: Session) -> int:
+    created = 0
+    for doctor in db.query(ApiDoctor).filter(ApiDoctor.department_id.isnot(None)).all():
+        created += ensure_doctor_schedules(db, doctor)
+    return created
+
+
+def refresh_doctor_free_schedules(db: Session, doctor: ApiDoctor) -> int:
+    """工作时间变更后，仅清理未来未预约且未停诊的自动可用排班。"""
+    start_date = schedule_now().date()
+    end_date = start_date + timedelta(days=SCHEDULE_DAYS - 1)
+    schedules = db.query(ApiSchedule).filter(
+        ApiSchedule.doctor_id == doctor.id,
+        ApiSchedule.date >= start_date,
+        ApiSchedule.date <= end_date,
+        ApiSchedule.status == 'available',
+    ).all()
+    removed = 0
+    for schedule in schedules:
+        if not occupied_slot_times(db, doctor.id, schedule.date):
+            db.delete(schedule)
+            removed += 1
+    db.flush()
+    ensure_doctor_schedules(db, doctor, start_date, SCHEDULE_DAYS)
+    return removed
 
 
 def get_patient_profile(db: Session, patient_id: str) -> Dict[str, Any]:
@@ -360,6 +566,10 @@ class DoctorProfileInput(BaseModel):
     duty_time: Optional[ShortText] = None
     bio: Optional[ClinicalText] = None
     description: Optional[ClinicalText] = None
+
+
+class ScheduleOverrideInput(BaseModel):
+    action: Annotated[str, Field(pattern=r"^(close|reopen)$")]
 
 
 class AgentInput(BaseModel):
@@ -487,6 +697,17 @@ async def close_request_db_sessions(request: Request, call_next):
 @app.on_event("startup")
 async def startup_event():
     validate_runtime_config()
+    db = SessionLocal()
+    try:
+        created = ensure_upcoming_schedules(db)
+        db.commit()
+        logger.info("schedule_bootstrap_completed created=%s days=%s", created, SCHEDULE_DAYS)
+    except SQLAlchemyError:
+        db.rollback()
+        # 兼容尚未执行迁移的旧部署：服务保持可启动，部署步骤会先运行迁移脚本。
+        logger.exception("schedule_bootstrap_skipped migration_required=true")
+    finally:
+        db.close()
 
 
 @app.on_event("shutdown")
@@ -758,15 +979,23 @@ async def get_departments():
 @app.get("/api/doctors/{doctor_id}/slots")
 async def get_doctor_slots(doctor_id: str, date: str = None):
     db = next(get_db())
-    
+    now = schedule_now()
     if date is None:
-        date = datetime.now().date().isoformat()
+        date = now.date().isoformat()
     
     doctor = db.query(ApiDoctor).filter(ApiDoctor.doctor_id == doctor_id).first()
     if not doctor:
         return {"code": 404, "msg": "Doctor not found"}
     
-    target_date = datetime.strptime(date, '%Y-%m-%d').date()
+    try:
+        target_date = datetime.strptime(date, '%Y-%m-%d').date()
+    except ValueError:
+        return JSONResponse(status_code=422, content={"code": 422, "msg": "日期格式应为 YYYY-MM-DD"})
+    if target_date < now.date() or target_date >= now.date() + timedelta(days=SCHEDULE_DAYS):
+        return {"code": 0, "data": {"doctor_id": doctor_id, "date": date, "available_slots": []}}
+
+    ensure_doctor_schedules(db, doctor, now.date(), SCHEDULE_DAYS)
+    db.commit()
     schedules = db.query(ApiSchedule).filter(
         ApiSchedule.doctor_id == doctor.id,
         ApiSchedule.date == target_date,
@@ -774,11 +1003,12 @@ async def get_doctor_slots(doctor_id: str, date: str = None):
         ApiSchedule.available_slots > 0,
     ).order_by(ApiSchedule.start_time.asc(), ApiSchedule.id.asc()).all()
     
+    occupied = occupied_slot_times(db, doctor.id, target_date)
     available_slots = []
     seen_slots = set()
     for schedule in schedules:
-        for slot in schedule_slot_times(schedule):
-            if slot not in seen_slots:
+        for slot in schedule_slot_times(schedule, SLOT_INTERVAL_MINUTES):
+            if slot not in occupied and slot not in seen_slots and not (target_date == now.date() and slot <= now.strftime('%H:%M')):
                 available_slots.append(slot)
                 seen_slots.add(slot)
     
@@ -805,6 +1035,13 @@ async def create_order(input_data: CreateOrderInput, token_info: Dict[str, Any] 
     
     try:
         visit_date = datetime.strptime(input_data.date, '%Y-%m-%d').date()
+        now = schedule_now()
+        if visit_date < now.date() or visit_date >= now.date() + timedelta(days=SCHEDULE_DAYS):
+            return JSONResponse(status_code=409, content={"code": 409, "msg": "仅可预约未来30天内的号源"})
+        if visit_date == now.date() and input_data.time <= now.strftime('%H:%M'):
+            return JSONResponse(status_code=409, content={"code": 409, "msg": "该时段已过，无法预约"})
+        ensure_doctor_schedules(db, doctor, now.date(), SCHEDULE_DAYS)
+        db.flush()
         schedule = db.query(ApiSchedule).filter(
             ApiSchedule.doctor_id == doctor.id,
             ApiSchedule.date == visit_date,
@@ -815,6 +1052,10 @@ async def create_order(input_data: CreateOrderInput, token_info: Dict[str, Any] 
         if not schedule:
             db.rollback()
             return JSONResponse(status_code=409, content={"code": 409, "msg": "该时段不可预约或余号不足"})
+
+        if input_data.time in occupied_slot_times(db, doctor.id, visit_date):
+            db.rollback()
+            return JSONResponse(status_code=409, content={"code": 409, "msg": "该时段已被其他患者预约"})
 
         order_id = f'O{datetime.now().strftime("%Y%m%d%H%M%S")}{uuid.uuid4().hex[:8]}'
         
@@ -831,7 +1072,15 @@ async def create_order(input_data: CreateOrderInput, token_info: Dict[str, Any] 
             status='pending'
         )
         db.add(order)
-        schedule.available_slots -= 1
+        db.flush()
+        db.add(ApiBookingSlot(
+            doctor_id=doctor.id,
+            schedule_id=schedule.id,
+            order_id=order.id,
+            date=visit_date,
+            time=input_data.time,
+        ))
+        schedule.available_slots = max(0, (schedule.available_slots or 0) - 1)
         db.commit()
         
         return {
@@ -844,6 +1093,9 @@ async def create_order(input_data: CreateOrderInput, token_info: Dict[str, Any] 
                 "time": input_data.time
             }
         }
+    except IntegrityError:
+        db.rollback()
+        return JSONResponse(status_code=409, content={"code": 409, "msg": "该时段已被其他患者预约"})
     except (SQLAlchemyError, ValueError) as e:
         db.rollback()
         logger.error(f"Create order error: {str(e)}")
@@ -1342,14 +1594,115 @@ async def update_doctor_profile(input_data: DoctorProfileInput, token_info: Dict
     
     try:
         update_data = input_data.dict(exclude_unset=True)
+        if 'duty_time' in update_data:
+            parse_duty_time(update_data['duty_time'] or '')
         for key, value in update_data.items():
             setattr(doctor, key, value)
+        refreshed = refresh_doctor_free_schedules(db, doctor) if 'duty_time' in update_data else 0
         db.commit()
-        return {"code": 0, "data": None}
+        return {"code": 0, "data": {"refreshed_schedule_count": refreshed}}
+    except ValueError as e:
+        db.rollback()
+        return JSONResponse(status_code=422, content={"code": 422, "msg": str(e)})
     except SQLAlchemyError as e:
         db.rollback()
         logger.error(f"Update doctor profile error: {str(e)}")
         return {"code": 500, "msg": "资料更新失败，请稍后重试"}
+
+
+@app.get("/api/doctor/schedules")
+async def get_doctor_schedules(authorization: str = Header(None), days: int = SCHEDULE_DAYS):
+    token_info = parse_token(authorization)
+    if not token_info or token_info.get('role') != 'doctor':
+        return {"code": 401, "msg": "Unauthorized"}
+    days = max(1, min(int(days), SCHEDULE_DAYS))
+    db = next(get_db())
+    doctor = current_doctor(db, token_info)
+    start_date = schedule_now().date()
+    try:
+        ensure_doctor_schedules(db, doctor, start_date, SCHEDULE_DAYS)
+        db.commit()
+        schedules = db.query(ApiSchedule).filter(
+            ApiSchedule.doctor_id == doctor.id,
+            ApiSchedule.date >= start_date,
+            ApiSchedule.date < start_date + timedelta(days=days),
+        ).order_by(ApiSchedule.date.asc(), ApiSchedule.start_time.asc()).all()
+        schedule_map = {(item.date, period_key_from_schedule(item)): item for item in schedules}
+        payload = []
+        weekday_labels = ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
+        for offset in range(days):
+            target_date = start_date + timedelta(days=offset)
+            periods = []
+            for key, label, _, _ in PERIOD_CONFIG:
+                item = schedule_map.get((target_date, key))
+                if not item:
+                    continue
+                occupied = occupied_slot_times(db, doctor.id, target_date)
+                all_slots = schedule_slot_times(item, SLOT_INTERVAL_MINUTES)
+                periods.append({
+                    "period": key,
+                    "label": label,
+                    "start_time": minutes_to_time(schedule_time_to_minutes(item.start_time)),
+                    "end_time": minutes_to_time(schedule_time_to_minutes(item.end_time)),
+                    "status": item.status,
+                    "booked_count": len([slot for slot in all_slots if slot in occupied]),
+                    "available_slots": 0 if item.status != 'available' else len([slot for slot in all_slots if slot not in occupied]),
+                })
+            payload.append({"date": target_date.isoformat(), "weekday": weekday_labels[target_date.weekday()], "periods": periods})
+        return {"code": 0, "data": {"days": payload}}
+    except SQLAlchemyError as e:
+        db.rollback()
+        logger.exception("get_doctor_schedules_failed doctor_id=%s", token_info.get('role_id'))
+        return {"code": 500, "msg": "排班加载失败，请稍后重试"}
+
+
+@app.patch("/api/doctor/schedules/{date}/{period}")
+async def update_doctor_schedule_override(date: str, period: str, input_data: ScheduleOverrideInput, token_info: Dict[str, Any] = Depends(limit_authenticated_write)):
+    require_role(token_info, "doctor")
+    if period not in {'morning', 'afternoon'}:
+        return JSONResponse(status_code=422, content={"code": 422, "msg": "时段仅支持 morning 或 afternoon"})
+    try:
+        target_date = datetime.strptime(date, '%Y-%m-%d').date()
+    except ValueError:
+        return JSONResponse(status_code=422, content={"code": 422, "msg": "日期格式应为 YYYY-MM-DD"})
+    today = schedule_now().date()
+    if target_date < today or target_date >= today + timedelta(days=SCHEDULE_DAYS):
+        return JSONResponse(status_code=409, content={"code": 409, "msg": "仅可调整未来30天内的排班"})
+
+    db = next(get_db())
+    doctor = current_doctor(db, token_info)
+    try:
+        ensure_doctor_schedules(db, doctor, today, SCHEDULE_DAYS)
+        schedule = db.query(ApiSchedule).filter(
+            ApiSchedule.doctor_id == doctor.id,
+            ApiSchedule.date == target_date,
+            ApiSchedule.morning_afternoon == ('上午' if period == 'morning' else '下午'),
+        ).with_for_update().first()
+        if not schedule:
+            db.rollback()
+            return JSONResponse(status_code=409, content={"code": 409, "msg": "该日期不在您的出诊时间内"})
+
+        override = db.query(ApiScheduleOverride).filter(
+            ApiScheduleOverride.doctor_id == doctor.id,
+            ApiScheduleOverride.date == target_date,
+            ApiScheduleOverride.period == period,
+        ).first()
+        if input_data.action == 'close':
+            if not override:
+                db.add(ApiScheduleOverride(doctor_id=doctor.id, date=target_date, period=period, status='closed'))
+            schedule.status = 'closed'
+            schedule.available_slots = 0
+        else:
+            if override:
+                db.delete(override)
+            schedule.status = 'available'
+            update_schedule_available_count(db, schedule)
+        db.commit()
+        return {"code": 0, "data": {"date": date, "period": period, "status": schedule.status}}
+    except SQLAlchemyError:
+        db.rollback()
+        logger.exception("update_doctor_schedule_failed doctor_id=%s", token_info.get('role_id'))
+        return {"code": 500, "msg": "排班更新失败，请稍后重试"}
 
 
 @app.get("/api/admin/users")

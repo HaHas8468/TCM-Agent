@@ -87,6 +87,19 @@ CREATE TABLE api_schedule (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 
+CREATE TABLE api_schedule_override (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    doctor_id BIGINT NOT NULL,
+    date DATE NOT NULL,
+    period VARCHAR(10) NOT NULL,
+    status VARCHAR(20) NOT NULL DEFAULT 'closed',
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_schedule_override_doctor_date_period (doctor_id, date, period),
+    FOREIGN KEY (doctor_id) REFERENCES api_doctor(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+
 CREATE TABLE api_order (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     order_id VARCHAR(50) NOT NULL UNIQUE,
@@ -127,6 +140,23 @@ CREATE TABLE api_order (
     FOREIGN KEY (doctor_id) REFERENCES api_doctor(id) ON DELETE SET NULL,
     FOREIGN KEY (department_id) REFERENCES api_department(id) ON DELETE SET NULL,
     FOREIGN KEY (schedule_id) REFERENCES api_schedule(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+
+CREATE TABLE api_booking_slot (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    doctor_id BIGINT NOT NULL,
+    schedule_id BIGINT NOT NULL,
+    order_id BIGINT NOT NULL,
+    date DATE NOT NULL,
+    time VARCHAR(20) NOT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_booking_slot_doctor_date_time (doctor_id, date, time),
+    UNIQUE KEY uq_booking_slot_order (order_id),
+    INDEX idx_booking_slot_schedule (schedule_id),
+    FOREIGN KEY (doctor_id) REFERENCES api_doctor(id) ON DELETE CASCADE,
+    FOREIGN KEY (schedule_id) REFERENCES api_schedule(id) ON DELETE CASCADE,
+    FOREIGN KEY (order_id) REFERENCES api_order(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 

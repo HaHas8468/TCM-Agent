@@ -128,6 +128,7 @@ async function handleDeleteCaseLibraryEntry(entryId, callbacks = {}) {
       :settings="state.settings"
       :doctor-profile="state.doctorProfile"
       :department-options="state.departmentOptions"
+      :auth-token="state.authToken"
       @save-profile="saveProfileSettings"
       @logout="logout"
     />
