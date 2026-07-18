@@ -521,72 +521,15 @@ def _supervisor_decide(scene: str, mode: str, user_input: str, symptoms_info: Op
 
 
 def _extract_symptoms_llm(user_input: str, history_str: str) -> SymptomsInfo:
-    """只从本轮医生原话提取，模型输出必须通过原文来源校验。"""
-    user_input_escaped = _escape_braces(user_input)
+    """按算法版从对话历史与当前输入提取并标准化四诊信息。"""
+    if len(history_str) > 2000:
+        history_str = history_str[-2000:]
     prompt = ChatPromptTemplate.from_messages([
         ("system", SYMPTOM_NORMALIZATION_PROMPT),
-        ("human", f"当前医生原话：\n{user_input_escaped}\n\n只提取原话明确出现的信息；不得依据经验补充症状、舌象或脉象。")
+        ("human", f"对话历史：\n{_escape_braces(history_str)}\n\n当前输入：{_escape_braces(user_input)}\n\n请提取并标准化症状信息。")
     ])
-    
     structured_llm = _get_llm_32b().with_structured_output(SymptomsInfo)
-    chain = prompt | structured_llm
-    extracted = chain.invoke({})
-
-    # 舌、脉只接受原文中包含相应关键词的完整分句，杜绝由症状反推四诊。
-    clauses = [re.sub(r"^(患者|病人)\s*", "", item.strip()) for item in re.split(r"[，,。；;\n]", user_input) if item.strip()]
-    tongue = next((item for item in clauses if "舌" in item), None)
-    pulse = next((item for item in clauses if "脉" in item), None)
-    symptom_clauses = [item for item in clauses if "舌" not in item and "脉" not in item]
-
-    synonyms = {
-        "恶寒": ("发寒", "怕冷", "畏寒", "冷得发抖"), "无汗": ("没汗", "不出汗", "身上没汗"),
-        "头痛": ("头疼",), "身疼": ("身体疼", "全身疼"), "腰痛": ("腰酸", "腰疼"),
-        "发热": ("发烧", "发低烧"), "气喘": ("气短", "喘气"), "腹泻": ("拉肚子",),
-        "胃痛": ("胃疼",), "失眠": ("睡不着",), "心悸": ("心慌",), "纳呆": ("没胃口", "食欲差"),
-    }
-    allowed = []
-    for symptom in extracted.symptoms or []:
-        if symptom in user_input or any(source in user_input for source in synonyms.get(symptom, ())):
-            allowed.append(symptom)
-    # 模型未能给出可验证规范名时保留医生原句，不丢失真实病情。
-    symptoms = list(dict.fromkeys(allowed or symptom_clauses))
-    missing = [label for label, value in (("舌象", tongue), ("脉象", pulse)) if not value]
-    return SymptomsInfo(
-        symptoms=symptoms,
-        tongue=tongue,
-        pulse=pulse,
-        chief_complaint=(allowed[0] if allowed else (symptom_clauses[0] if symptom_clauses else None)),
-        is_complete=bool(symptoms and tongue and pulse),
-        missing_info=f"还需要：{'、'.join(missing)}" if missing else "",
-        user_refused=extracted.user_refused,
-    )
-
-
-def _merge_symptom_lists(*symptom_lists: List[str]) -> List[str]:
-    """按首次出现顺序去重，避免 set() 导致每次查询顺序不同。"""
-    return list(dict.fromkeys(
-        symptom.strip()
-        for symptoms in symptom_lists
-        for symptom in (symptoms or [])
-        if symptom and symptom.strip()
-    ))
-
-
-def _merge_symptoms_info(existing: SymptomsInfo, incoming: SymptomsInfo) -> SymptomsInfo:
-    """合并同一病例的补充信息；既有四诊不被后续模型结果覆盖。"""
-    symptoms = _merge_symptom_lists(existing.symptoms, incoming.symptoms)
-    tongue = existing.tongue or incoming.tongue
-    pulse = existing.pulse or incoming.pulse
-    missing = [label for label, value in (("舌象", tongue), ("脉象", pulse)) if not value]
-    return SymptomsInfo(
-        symptoms=symptoms,
-        tongue=tongue,
-        pulse=pulse,
-        chief_complaint=incoming.chief_complaint or existing.chief_complaint,
-        is_complete=bool(symptoms and tongue and pulse),
-        missing_info=f"还需要：{'、'.join(missing)}" if missing else "",
-        user_refused=existing.user_refused or incoming.user_refused,
-    )
+    return (prompt | structured_llm).invoke({})
 
 
 def _diagnose_and_respond(
@@ -883,12 +826,8 @@ def supervisor_node(state: AgentState) -> AgentState:
     if decision.user_refused:
         refuse_count += 1
 
-    # 信息不全时必须由医生明确下达“按现有资料分析”指令才可进入受限分析。
-    # 单纯“不知道/没有了”不能被模型误判为允许补造四诊或直接辨证。
-    provisional_requested = any(keyword in state["user_input"] for keyword in (
-        "基于现有信息分析", "基于已有信息分析", "按现有资料分析", "仅根据已有资料分析",
-    ))
-    if provisional_requested and intent not in ("custom_query", "medical_case", "department_inquiry"):
+    # 与算法版一致：用户明确拒绝或要求结束追问时，以已收集信息直接进入辨证。
+    if (decision.user_explicit_stop or decision.user_refused or decision.force_diagnosis) and intent not in ("custom_query", "medical_case", "department_inquiry"):
         if has_symptoms:
             intent = "diagnosis"
             force_diagnosis = True
@@ -938,7 +877,7 @@ def supervisor_node(state: AgentState) -> AgentState:
                 force_diagnosis = True
 
             # 如果用户已明确拒绝提供舌象脉象，且有症状，直接强制诊断
-            if merged_symptoms and provisional_requested:
+            if merged_symptoms and (decision.user_explicit_stop or decision.user_refused or merged_refused):
                 logger.debug(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 合并后用户已拒绝，强制诊断")
                 intent = "diagnosis"
                 force_diagnosis = True
@@ -986,7 +925,7 @@ def supervisor_node(state: AgentState) -> AgentState:
                 intent = "diagnosis"
                 force_diagnosis = True
             # 首次提取时，如果用户已明确拒绝提供舌象脉象，且有症状，直接强制诊断
-            elif new_si.symptoms and provisional_requested:
+            elif new_si.symptoms and (decision.user_explicit_stop or decision.user_refused or new_si.user_refused):
                 logger.debug(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 首次提取后用户已拒绝，强制诊断")
                 intent = "diagnosis"
                 force_diagnosis = True
@@ -1027,14 +966,25 @@ def supervisor_node(state: AgentState) -> AgentState:
                             "请自己或请家人帮忙摸脉，描述大致感受（如跳得快还是慢、轻按还是重按才摸到等）。"
                         )
 
-    # 已完成辨证后，医生再次补充本病例症状时，合并经当前原文校验的事实后重新辨证。
-    # 仅对 diagnosis 意图生效，知识问答、解释、医案检索不会污染病例状态。
+    # 与算法版一致：已辨证后补充症状时，累加症状并再次辨证。
     elif intent == "diagnosis":
         existing_si = state.get("symptoms_info")
         if isinstance(existing_si, SymptomsInfo) and existing_si.symptoms:
             incoming_si = _extract_symptoms_llm(state["user_input"], history_str)
             if incoming_si.symptoms:
-                updated_symptoms_info = _merge_symptoms_info(existing_si, incoming_si)
+                merged_symptoms = list(set((existing_si.symptoms or []) + (incoming_si.symptoms or [])))
+                merged_tongue = existing_si.tongue or incoming_si.tongue
+                merged_pulse = existing_si.pulse or incoming_si.pulse
+                missing_items = [label for label, value in (("舌象", merged_tongue), ("脉象", merged_pulse)) if not value]
+                updated_symptoms_info = SymptomsInfo(
+                    symptoms=merged_symptoms,
+                    tongue=merged_tongue,
+                    pulse=merged_pulse,
+                    chief_complaint=incoming_si.chief_complaint or existing_si.chief_complaint,
+                    is_complete=bool(merged_symptoms and merged_tongue and merged_pulse),
+                    missing_info=f"还需要：{'、'.join(missing_items)}" if missing_items else "",
+                    user_refused=existing_si.user_refused or incoming_si.user_refused,
+                )
                 logger.debug(
                     "diagnosis_symptoms_merged previous=%s current=%s total=%s",
                     len(existing_si.symptoms), len(incoming_si.symptoms), len(updated_symptoms_info.symptoms),

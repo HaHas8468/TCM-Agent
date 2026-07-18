@@ -36,15 +36,14 @@ def test_sync_chat_does_not_shadow_human_message_before_message_creation():
     assert "from langchain_core.messages import SystemMessage, HumanMessage" not in body
 
 
-def test_diagnosis_follow_up_merges_new_symptoms_without_reverting_fact_guards():
+def test_diagnosis_follow_up_uses_algorithm_style_history_extraction_and_merge():
     source = (BACKEND / "traditional_medical_agent" / "tcm_agent.py").read_text(encoding="utf-8")
 
-    assert "def _merge_symptom_lists" in source
-    assert "def _merge_symptoms_info" in source
     assert 'elif intent == "diagnosis":' in source
     assert "incoming_si = _extract_symptoms_llm(state[\"user_input\"], history_str)" in source
-    assert "updated_symptoms_info = _merge_symptoms_info(existing_si, incoming_si)" in source
-    assert "只提取原话明确出现的信息；不得依据经验补充症状、舌象或脉象。" in source
+    assert "merged_symptoms = list(set((existing_si.symptoms or []) + (incoming_si.symptoms or [])))" in source
+    assert "对话历史：" in source
+    assert "decision.user_explicit_stop or decision.user_refused or decision.force_diagnosis" in source
 
 
 def test_knowledge_graph_is_an_internal_compose_service():
